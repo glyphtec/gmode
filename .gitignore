@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+
+# CalculiX / solver run artifacts
+*.frd
+*.dat
+*.sta
+*.cvg
+*.12d
+*.out
+*.msh
+
+# OS / editor
+.DS_Store
+Thumbs.db
