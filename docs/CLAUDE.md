@@ -12,9 +12,9 @@ The author has a full experimental validation stack (tap spectra, Chladni, stati
 
 ## Stack (decided)
 
-- Blender **4.5 LTS**, extensions system (`blender_manifest.toml`), Windows 11, VS Code.
+- Blender **5.2 LTS**, extensions system (`blender_manifest.toml`), Windows 11, VS Code.
 - **CalculiX 2.22**: `C:\Program Files\FreeCAD 1.1\bin\ccx.exe` (standalone-runnable; no `-v` flag, run bare to see the banner). Path lives in add-on preferences, never hardcoded, never PATH-dependent.
-- **gmsh + meshio + mesh-repair lib** in a normal system **venv**, called by subprocess with explicit full paths. Never import them into Blender's bundled Python 3.11.
+- **gmsh + meshio + mesh-repair lib** in a normal system **venv**, called by subprocess with explicit full paths. Never import them into Blender's bundled Python (3.13 in 5.2 LTS).
 - Verify CalculiX card syntax against the 2.22 manual before generating; do not write cards from memory.
 
 ## Architecture rules

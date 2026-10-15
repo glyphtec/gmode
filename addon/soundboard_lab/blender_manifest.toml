@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+
+id = "soundboard_lab"
+version = "0.0.1"
+name = "Soundboard Lab"
+tagline = "Eigenmode analysis for luthier soundboard experiments"
+maintainer = "Soundboard Lab <noreply@example.com>"
+type = "add-on"
+
+blender_version_min = "5.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Write assembly/.inp files and read CalculiX solver output"

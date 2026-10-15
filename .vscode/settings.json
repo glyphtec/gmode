@@ -1,0 +1,11 @@
+{
+    "blender.executables": [
+        {
+            "path": "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe",
+            "name": "5.2 LTS",
+            "isDebug": false
+        }
+    ],
+    "blender.addon.loadDirectory": "./addon/soundboard_lab",
+    "blender.addon.sourceDirectory": "./addon/soundboard_lab"
+}
