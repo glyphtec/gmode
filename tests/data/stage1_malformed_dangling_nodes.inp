@@ -1,0 +1,22 @@
+** Soundboard Lab -- deliberately malformed Stage 1 fixture.
+** The single C3D8 element references 8 nodes but only 2 are defined
+** (3-8 are dangling references). Used to prove run_ccx() surfaces
+** failure robustly: observed empirically to crash ccx outright (a
+** native Windows exit code, no graceful "*ERROR" text) rather than
+** exit cleanly with a message -- so error handling must treat ANY
+** nonzero return code as failure, never assume a tidy diagnostic.
+*NODE, NSET=Nall
+1, 0, 0, 0
+2, 10, 0, 0
+*ELEMENT, TYPE=C3D8, ELSET=Evolumes
+1, 1, 2, 3, 4, 5, 6, 7, 8
+*MATERIAL, NAME=GenericSteel
+*ELASTIC
+200000, 0.3
+*DENSITY
+7.9E-09
+*SOLID SECTION, ELSET=Evolumes, MATERIAL=GenericSteel
+*STEP
+*FREQUENCY
+10
+*END STEP

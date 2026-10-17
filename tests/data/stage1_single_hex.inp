@@ -1,0 +1,44 @@
+** Soundboard Lab -- Stage 1 validation ladder reference.
+** Hand-built, deliberately minimal: a single linear C3D8 hex element,
+** free-free (no *BOUNDARY), isotropic steel-like material. Purpose is
+** to validate the ccx invocation + .dat output parsing path only --
+** NOT meshing or element-order accuracy (see docs/CLAUDE.md "known
+** traps": the real pipeline uses gmsh-generated quadratic C3D10 tets,
+** introduced at validation ladder Stage 2).
+**
+** Units: mm, t, s, K (same convention as CalculiX's own worked
+** examples -- see ccx manual "about units"). E in N/mm^2 (MPa),
+** density in t/mm^3. Material constants match CalculiX's bundled
+** box_frequency.inp generic-steel reference (E=200000 MPa, nu=0.3,
+** density=7.9E-09 t/mm^3 = 7900 kg/m^3), reused here rather than
+** invented, to keep this file traceable to a known-good source.
+**
+** Node order follows the standard Abaqus/CalculiX C3D8 convention:
+** bottom face 1-2-3-4 counterclockwise, top face 5-6-7-8 directly
+** above 1-2-3-4 respectively.
+*NODE, NSET=Nall
+1, 0, 0, 0
+2, 10, 0, 0
+3, 10, 10, 0
+4, 0, 10, 0
+5, 0, 0, 10
+6, 10, 0, 10
+7, 10, 10, 10
+8, 0, 10, 10
+*ELEMENT, TYPE=C3D8, ELSET=Evolumes
+1, 1, 2, 3, 4, 5, 6, 7, 8
+*MATERIAL, NAME=GenericSteel
+*ELASTIC
+200000, 0.3
+*DENSITY
+7.9E-09
+*SOLID SECTION, ELSET=Evolumes, MATERIAL=GenericSteel
+*STEP
+*FREQUENCY
+10
+*NODE FILE
+U
+*EL FILE
+S, E
+*OUTPUT, FREQUENCY=1
+*END STEP
