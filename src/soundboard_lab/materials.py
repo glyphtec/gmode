@@ -125,3 +125,29 @@ def validate_positive_definite(m: OrthotropicWoodMaterial) -> None:
             "these constants are physically invalid and would produce "
             "unstable/garbage eigenfrequencies rather than a clean solver error"
         )
+
+
+# Placeholder spruce constants, NOT the project owner's lab-measured
+# values (see module docstring and docs/CLAUDE.md: "Material constants
+# come from her lab-measured library, never hardcoded defaults").
+# Combines two sources: density/E_L/E_R/G_LR/nu_LR from real
+# measurements on actual spruce guitar soundboards (Giro et al.,
+# "Predicting the Effects of Bracing Pattern Modifications on Acoustic
+# Guitar Soundboards", Forum Acusticum 2023) -- a 2D thin-plate model
+# that doesn't cover through-thickness (tangential) properties -- with
+# E_T/G_LT/G_RT/nu_LT/nu_RT estimated from general wood-science
+# literature ratios to fill that gap. For plumbing validation only;
+# replace with real lab data before drawing any conclusions from it.
+SPRUCE_PLACEHOLDER = OrthotropicWoodMaterial(
+    name="SprucePlaceholder",
+    density=4.6e-10,  # 460 kg/m^3 in t/mm^3
+    e_longitudinal=13800,  # MPa
+    e_radial=811.76,
+    e_tangential=593.4,
+    g_lr=828.0,
+    g_lt=621.0,
+    g_rt=41.4,
+    nu_lr=0.38,
+    nu_lt=0.40,
+    nu_rt=0.45,
+)

@@ -26,25 +26,11 @@ is for plumbing validation only.
 
 from pathlib import Path
 
-from soundboard_lab.materials import OrthotropicWoodMaterial, validate_positive_definite
+from soundboard_lab.materials import SPRUCE_PLACEHOLDER, validate_positive_definite
 from soundboard_lab.mesh import mesh_surface, write_frequency_inp_orthotropic
 from soundboard_lab.solver import parse_eigenfrequencies, run_ccx
 
 DATA_DIR = Path(__file__).parent / "data"
-
-SPRUCE_PLACEHOLDER = OrthotropicWoodMaterial(
-    name="SprucePlaceholder",
-    density=4.6e-10,  # 460 kg/m^3 in t/mm^3
-    e_longitudinal=13800,  # MPa
-    e_radial=811.76,
-    e_tangential=593.4,
-    g_lr=828.0,
-    g_lt=621.0,
-    g_rt=41.4,
-    nu_lr=0.38,
-    nu_lt=0.40,
-    nu_rt=0.45,
-)
 
 
 def test_spruce_placeholder_is_positive_definite():
