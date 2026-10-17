@@ -30,12 +30,43 @@ The author has a full experimental validation stack (tap spectra, Chladni, stati
 4. **Soundboard is a full 3D solid**, not a shell with thickness. Tapered, CNC-contoured and rib-less relief designs must work without re-architecture. Ribs, bridge plate, lining etc. are separate bodies by default.
 5. **Boundary conditions are per-analysis configuration, never a pipeline default.** Free-free is only correct for bare-plate validation runs matching the free-suspended tap rig. The instrument model terminates at the rim lining body (see above), whose terminal condition and own material/geometry together determine how much energy the rim leaks — not a single scalar stiffness.
 
+## Material library (Blender interface, decided)
+
+Physical material records are carried by native **`bpy.types.Material` ID-blocks**, not a custom add-on-side list. An object's material slot *is* its physical material assignment — the same mechanism a user already knows from shading, repurposed so the slot holds lab-measured physical data instead of (or alongside) shader data. This buys link/append across a personal `materials_library.blend`, Asset Browser cataloguing/preview/drag-drop, and Blender's existing new/duplicate/make-single-user/fake-user/rename chrome, all for free — none of that gets rebuilt.
+
+- **Isotropic and orthotropic are distinct material kinds** (not one type with a switch). Each kind has its own property set (isotropic: E, ν, density; orthotropic: the full stiffness constant set, density) and its own UI fields; don't force a shared schema that leaves fields meaningless depending on a toggle.
+- **Grain/axis orientation is per-object, never per-material.** The same spruce material definition gets reused across boards with different grain directions, so orientation (X = radial, Y = longitudinal/grain, Z = tangential) is an object-level property, independent of which Material ID-block is assigned.
+- **UI surface**: the N-panel's Bodies & Roles sub-panel gets a material picker (new/browse/X, same pattern as a normal material slot) plus inline physical fields, so role assignment and material assignment stay in one place. Optionally mirror the full field set into the Properties Editor's Material tab for deeper editing.
+- Keep the engine/UI boundary rule intact: the engine's assembly model still receives plain material data (kind, constants, orientation) extracted from the `Material` ID-block and object, never a `bpy.types.Material` reference itself.
+
+## Grain orientation (Blender interface, decided)
+
+Prototyped and validated interactively (see session history); the design below is what shipped, not aspirational.
+
+- **Storage**: `grain_rotation`, a per-object `FloatVectorProperty(subtype='EULER', size=3)` on the object's Soundboard Lab settings — same shape as Blender's own `rotation_euler`, so the N-panel shows familiar X/Y/Z degree fields. Independent of the Material ID-block (per the Material library section above).
+- **Interactive rosette**: a `GizmoGroup` drawing three color-coded `GIZMO_GT_dial_3d` rings (red=X/radial, green=Y/longitudinal/grain, blue=Z/tangential), nested at different radii like a gimbal/armillary sphere rather than coincident circles — a thin flat soundboard otherwise puts the Z/tangential ring's plane flush with the board's own face, making it unreadable and hard to grab. Gated on role (Soundboard, Rib) **and** the assigned material being the Orthotropic kind; no rosette for isotropic bodies.
+- **`target_set_handler`, not `target_set_prop` with `index=`**: `GIZMO_GT_dial_3d`'s `offset` target is declared as a plain scalar in Blender's own gizmo library, so `index=` is only valid as 0 (confirmed via a live `RuntimeError: index 1 must be below 1`) — it cannot bind one ring per Euler component the way the built-in Move gizmo's arrows bind to `location[i]`. Use explicit `get`/`set` callbacks per axis instead, closing over the axis index via a factory function (avoids the classic Python loop-closure bug).
+- **`draw_options = {'ANGLE_VALUE'}`** is required on each dial or it draws a bare ring with no handle/indicator line at all — not optional polish.
+- **`GizmoGroup` registration must be guarded** with `if not bpy.app.background:` (mirrors the existing keymap guard in this file). GizmoGroups need a window manager; headless/`--background` runs (smoke tests, CI) have none, and registering anyway leaves the class in a state where `unregister_class` later raises "missing bl_rna".
+- **Custom `set` callbacks must never raise.** They run inside a gizmo modal callback on every mouse-move, in a more restricted context than a normal operator; an uncaught exception there makes Blender treat the whole drag as failed and revert the value to what it was at drag-start. Anything non-essential a callback does (e.g. forcing a UI redraw, since `target_set_handler` bypasses the automatic redraw-tagging that `target_set_prop`'s native RNA path gets for free) must be wrapped so it can't propagate.
+- **The relative "grab anywhere, drag out a delta" interaction** (not "ring snaps to point at my cursor") is Blender's native rotate-dial convention, not a bug — matches the same mental model as the built-in Object Rotate (R) tool.
+- Quick-align operators: `Align Grain to World Axes` (reset to local axes) and `Align Grain to Active Edge` (snap the grain/Y axis to a selected mesh edge, for matching a visible grain line), both in the same N-panel sub-panel as the Euler fields.
+
 ## Meshing and numerics (known traps)
 
 - Use **quadratic tets (C3D10)**. Linear tets lock in thin bending and give eigenfrequencies that are systematically too high.
 - Enforce **>= 2-3 element layers through thickness** (soundboard is ~2 mm). Use a thickness-aware gmsh size field, not one global size. Tapered thickness is its own explicit pass/fail test.
 - Orthotropic stiffness must be positive definite; validate the constants before solving (small minor Poisson ratios have caused negative eigenfrequencies in her earlier work). Axis convention: **X = radial, Y = longitudinal/grain, Z = tangential**. Material constants come from her lab-measured library, never hardcoded defaults.
 - Point-attachment locations must survive remeshing as identifiable nodes. Register them in gmsh as embedded/constrained points and carry node IDs into the spring/force cards. For Evergreen, these coincide with the Bridge Plate's boss extensions (registered CF-composite features, not arbitrary flat-plate locations) -- an easier case to keep robust through remeshing than an unmarked point.
+
+## Mesh preview & validation (Blender interface, decided)
+
+"Trust me, it passed validation" isn't good enough — the mesh and its QA checks must be genuinely visible, not just pass/fail text.
+
+- **Granularity control hides gmsh's sizing-field vocabulary.** One simple control (e.g. target element size, or Fine/Medium/Coarse presets) that the engine turns into a thickness-aware sizing field automatically, silently guaranteeing the >=2-3-layers-through-thickness rule underneath — matches the project's "small fixed vocabulary of guitar concepts" philosophy; luthiers don't need to understand gmsh size fields.
+- **Boundary-skin preview mesh**: extract the generated mesh's outer triangular faces and build an actual lightweight Blender mesh object from them (meshio -> bmesh), named distinctly (e.g. `<Body> Mesh Preview`) and explicitly excluded from the role/assembly/bond system so it can't be mistaken for a real body. Gives native orbit/zoom/wireframe toggling for free.
+- **Mesh-quality heat map on that same preview mesh**, driven by gmsh's own per-element quality metrics (aspect ratio, Jacobian) via a Color Attribute, viewable with zero material setup using Solid shading's "Attribute" color mode. This is the same node-import + Color-Attribute machinery the mode-shape results viewer needs (see below) — building it here first, on a lower-stakes problem, exercises that pipeline before it has to carry eigenmode results.
+- **Thickness-layers-achieved is a number, not a wireframe.** Showing every internal tet edge to visually verify the layer-count trap would be unreadable at real-model scale; the engine counts layers per thin region from element connectivity directly and reports it (pass/fail or a count) rather than asking the user to eyeball it in 3D.
 
 ## Bonding: must be bulletproof (the reason this project exists)
 
@@ -47,6 +78,15 @@ SimScale and FreeCAD FEM both failed her on multi-material bonding via **silent*
 4. Bond only via **facet/surface-based `*TIE`** (no node-matched bonding). Master/slave chosen by a stated rule (coarser/stiffer as master), not by accident.
 5. **Visual verification in the viewport**: role colors per body; a "Verify Assembly" operator drawing green/yellow/red bond regions via a `gpu` draw handler (non-destructive); click-to-inspect showing gap, bodies and tolerance in the sidebar. Eigenmodes imported as shape keys so a floating part is visible by eye.
 
+## Results viewer (Blender interface, decided)
+
+- **UIList of modes in the Results & Verification N-panel sub-panel** (mode #, frequency); no dedicated workspace needed for v1 — the default Layout workspace's N-panel plus the 3D viewport is sufficient. A dedicated workspace (viewport + N-panel + maybe a Spreadsheet editor for raw per-node numbers) is plausible later polish, not a v1 requirement.
+- **Selecting a row drives the view, live**: sets that mode's shape key to its deformed pose (others zeroed) and switches the active Color Attribute to that mode's heat map, no extra click.
+- **No animation.** A static pose per selected mode is sufficient; nothing oscillates.
+- **Heat map scalar field: signed displacement along the soundboard object's own local Z axis** (its authored through-thickness direction as modeled — not world Z, not the grain-rotation material frame's Z). Soundboard bending modes have negligible in-plane motion; local-Z out-of-plane displacement is what her Chladni photos are actually defined by (nodal lines = zero-crossings of transverse motion), so this is the scalar that makes a direct visual comparison possible.
+- **Colored on the Soundboard-role body's surface specifically**, even when ribs/bridge plate/lining are part of the same solve — matches where Chladni powder actually sits in her physical tests; other bodies aren't colored.
+- **Per-mode auto-normalized color range**, not a shared scale across modes. Eigenmode amplitudes are solver-arbitrary (only defined up to a scale factor), so a shared scale would be meaningless; per-mode normalization doesn't move the zero-crossing nodal lines, which is what the Chladni comparison actually needs. Cross-mode amplitude comparison, if ever wanted, would need a different, physically-grounded scale (e.g. normalized against modal mass) — not the default.
+
 ## Scope
 
 **In (v1):** eigenmode analysis of soundboard + bridge plate + rib array; material library (orthotropic spruce proxy, isotropic bridge plate, rib composites) applied per body; rim lining body with its own material/geometry and a per-object terminal condition (fixed / free / spring); two point springs (compensators) at the bridge plate; optional static string-force preload run A/B against no-preload; mass loading; MAC comparison against measured mode shapes; mode-shape viewer.
@@ -54,6 +94,8 @@ SimScale and FreeCAD FEM both failed her on multi-material bonding via **silent*
 **Evergreen-specific:** two compensator springs (~2.72 kgf/mm each, ~3 g), bolted to the bridge plate; plate stiffness is largely swamped by them, so they must be in the model. Goal is a **calibrated baseline model of the current instrument** that reproduces measured modal frequencies (M1/T1 about 178-182 Hz, A0 about 98-102 Hz), then use it to test bracing candidates toward M1 about 190-200 Hz.
 
 **Out for now (deferred, keep the analysis-sequence model extensible):** mobility / driven damped response, full-box coupling (back, sides, air cavity), other solvers. The lining's terminal-condition rule (applies only to currently-unbonded nodes) is designed so adding these later doesn't require reworking the rim model.
+
+**v1.5+ (deferred, confirmed viable):** **curved orthotropic material orientation**, for bent ribs where the grain (Y/longitudinal) axis should sweep along a curve's tangent rather than stay one fixed Euler rotation for the whole object -- analogous to the curve-sweep modeling technique already used for the geometry itself, and valuable for her common methods. Confirmed against the real CalculiX manual (not assumed): `*ORIENTATION` can reference a `*DISTRIBUTION` card giving a **different local axis per element/element set**, applied via `*SOLID SECTION ..., ORIENTATION=name` -- a genuinely supported mechanism, not exotic. Real engine work required (not just a UI picker): for each FE element, find the nearest point on the driving curve and take its tangent as that element's local Y axis, emitting one `*DISTRIBUTION` row per element. Likely reuses the same curve object already used to sweep the rib's geometry, rather than a separate spline tool. UI would need a per-object toggle alongside the existing constant-orientation rosette: Fixed (today's Euler + rosette) vs. Follow Curve (pick a curve object).
 
 ## Evergreen force path (patent-derived, see `docs/1431-02 - Drawings_r1.pdf`)
 
