@@ -12,6 +12,8 @@ import bmesh
 import bpy
 from mathutils import Matrix, Vector
 
+from . import analysis
+
 # Roles whose material may be orthotropic and therefore carries a grain axis
 # (see docs/CLAUDE.md, "Material library"). Bridge plate / mass load / lining
 # are isotropic by default and get no grain-orientation UI.
@@ -65,6 +67,27 @@ class SoundboardLabObjectSettings(bpy.types.PropertyGroup):
         subtype='EULER',
         size=3,
         default=(0.0, 0.0, 0.0),
+    )
+    mesh_element_size: bpy.props.FloatProperty(
+        name="Element Size",
+        description=(
+            "Target gmsh element size (mesh units, e.g. mm). Does not yet "
+            "implement a spatially-varying thickness-aware sizing field "
+            "(docs/CLAUDE.md known traps) -- pair with Thickness Hint below "
+            "to at least fail loudly if this is too coarse for the body's "
+            "thickness, rather than silently producing an over-stiff mesh"
+        ),
+        default=10.0,
+        min=0.01,
+    )
+    mesh_thickness_hint: bpy.props.FloatProperty(
+        name="Thickness Hint",
+        description=(
+            "Approximate thickness of this body, used only to check Element "
+            "Size gives enough layers through it (>= 2). 0 skips the check"
+        ),
+        default=0.0,
+        min=0.0,
     )
 
 
@@ -446,7 +469,19 @@ class SOUNDBOARD_PT_analysis(bpy.types.Panel):
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        self.layout.label(text="Analysis sequence / solve launch (placeholder)")
+        layout = self.layout
+        obj = context.object
+        if obj is not None and obj.soundboard_lab.role == 'SOUNDBOARD':
+            layout.prop(obj.soundboard_lab, "mesh_element_size")
+            layout.prop(obj.soundboard_lab, "mesh_thickness_hint")
+        else:
+            layout.label(text="Select a Soundboard-role object")
+        layout.operator(analysis.SOUNDBOARD_OT_analyze_free_free.bl_idname, icon='PLAY')
+        status = context.scene.soundboard_lab_status
+        if status == 'RUNNING':
+            layout.label(text="Solving...", icon='TIME')
+        elif status == 'ERROR':
+            layout.label(text=context.scene.soundboard_lab_message, icon='ERROR')
 
 
 class SOUNDBOARD_PT_results(bpy.types.Panel):
@@ -458,7 +493,15 @@ class SOUNDBOARD_PT_results(bpy.types.Panel):
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        self.layout.label(text="Mode viewer / MAC comparison (placeholder)")
+        layout = self.layout
+        scene = context.scene
+        if scene.soundboard_lab_status != 'DONE':
+            layout.label(text="No results yet -- run Analysis & Solve")
+            return
+        layout.label(text=scene.soundboard_lab_message)
+        col = layout.column()
+        for item in scene.soundboard_lab_results:
+            col.label(text=f"Mode {item.mode_number}: {item.frequency_hz:.4g} Hz")
 
 
 # ---------------------------------------------------------------------------
@@ -518,6 +561,7 @@ classes = (
 
 
 def register():
+    analysis.register()
     for cls in classes:
         bpy.utils.register_class(cls)
     if not bpy.app.background:
@@ -541,4 +585,5 @@ def unregister():
         bpy.utils.unregister_class(SOUNDBOARD_GGT_grain_rosette)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+    analysis.unregister()
     print("Soundboard Lab: unregistered")

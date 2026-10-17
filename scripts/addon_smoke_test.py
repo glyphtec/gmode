@@ -98,6 +98,67 @@ assert result == {'FINISHED'}, f"align_grain_to_edge returned {result}"
 assert tuple(obj.soundboard_lab.grain_rotation) != (0.0, 0.0, 0.0), "grain not aligned to edge"
 bpy.ops.object.mode_set(mode='OBJECT')
 
+# --- Analysis & Solve: real end-to-end subprocess pipeline ---
+# Unlike the gizmo, this needs no window manager -- it's just
+# subprocess launching -- so it can be fully exercised headlessly,
+# including actually running gmsh + ccx for real.
+import time
+
+obj.soundboard_lab.mesh_element_size = 0.5  # cube is 2 units across
+obj.soundboard_lab.mesh_thickness_hint = 0.0  # skip the layer check here
+
+CCX_EXE = r"C:\Program Files\FreeCAD 1.1\bin\ccx.exe"
+ENGINE_PYTHON = r"C:\GlyphstoneCloud\CloudStation\LocalDev\gmode\.venv\Scripts\python.exe"
+
+assert addon.analysis.find_soundboard_object(bpy.context).name == obj.name
+
+handle = addon.analysis.start_solve(bpy.context, obj, CCX_EXE, ENGINE_PYTHON)
+result = None
+for _ in range(120):  # up to ~60s
+    result = addon.analysis.poll_solve(handle)
+    if result is not None:
+        break
+    time.sleep(0.5)
+assert result is not None, "engine subprocess did not finish in time"
+print("Analysis result:", result)
+assert result["status"] == "ok", result
+assert result["tetra_count"] > 1
+assert len(result["modes"]) == 10
+
+# _apply_result is what the real timer callback uses to populate scene
+# properties (poll_solve itself just returns the raw dict) -- verify
+# that wiring directly since the pipeline test above bypassed it.
+addon.analysis._apply_result(bpy.context.scene, result)
+assert bpy.context.scene.soundboard_lab_status == 'DONE'
+assert len(bpy.context.scene.soundboard_lab_results) == 10
+assert bpy.context.scene.soundboard_lab_results[0].mode_number == 1
+assert bpy.context.scene.soundboard_lab_results[9].frequency_hz == result["modes"][9]["frequency_hz"]
+
+error_result = {"status": "error", "message": "synthetic test error"}
+addon.analysis._apply_result(bpy.context.scene, error_result)
+assert bpy.context.scene.soundboard_lab_status == 'ERROR'
+assert bpy.context.scene.soundboard_lab_message == "synthetic test error"
+assert len(bpy.context.scene.soundboard_lab_results) == 0
+
+# Scene-collection errors: zero candidates, then multiple candidates.
+obj.soundboard_lab.role = 'RIB'
+try:
+    addon.analysis.find_soundboard_object(bpy.context)
+    raise AssertionError("expected SoundboardLabSceneError for zero candidates")
+except addon.analysis.SoundboardLabSceneError:
+    pass
+obj.soundboard_lab.role = 'SOUNDBOARD'
+
+bpy.ops.mesh.primitive_cube_add()
+obj2 = bpy.context.active_object
+obj2.soundboard_lab.role = 'SOUNDBOARD'
+try:
+    addon.analysis.find_soundboard_object(bpy.context)
+    raise AssertionError("expected SoundboardLabSceneError for multiple candidates")
+except addon.analysis.SoundboardLabSceneError:
+    pass
+bpy.data.objects.remove(obj2, do_unlink=True)
+
 print("=== Soundboard Lab smoke test: unregister ===")
 addon.unregister()
 assert not hasattr(bpy.types.Object, "soundboard_lab"), "Object.soundboard_lab not cleaned up"
