@@ -233,7 +233,17 @@ def _apply_result(scene, result: dict) -> None:
     scene.soundboard_lab_results.clear()
     if result["status"] == "ok":
         scene.soundboard_lab_status = 'DONE'
-        scene.soundboard_lab_message = f"{result['tetra_count']} elements, {result['material_name']}"
+        message = f"{result['tetra_count']} elements, {result['material_name']}"
+        repair = result.get("mesh_repair")
+        if repair is not None:
+            if repair["was_already_valid"]:
+                message += " | mesh was already valid"
+            else:
+                problems = "; ".join(repair["problems_found"])
+                message += f" | mesh repaired ({problems})"
+                if repair["components_removed"]:
+                    message += f", removed {repair['components_removed']} disconnected piece(s)"
+        scene.soundboard_lab_message = message
         for mode in result["modes"]:
             item = scene.soundboard_lab_results.add()
             item.mode_number = mode["mode_number"]
