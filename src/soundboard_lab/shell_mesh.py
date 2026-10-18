@@ -13,6 +13,7 @@ Pure Python, no `bpy` imports (see docs/CLAUDE.md, "Engine/UI boundary").
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,17 +37,101 @@ class ShellMesh:
     top_z: np.ndarray  # (V,) per-vertex top-surface Z
 
 
-def extrude_shell_to_prisms(shell: ShellMesh, num_layers: int) -> tuple[np.ndarray, np.ndarray]:
+def find_boundary_loops(triangles: np.ndarray) -> list[list[int]]:
+    """Find every boundary loop in a 2D triangulation -- the outer
+    perimeter AND any interior holes (e.g. a soundhole) are both
+    topologically "boundary loops" by this test; distinguishing which
+    is which is `classify_boundary_loops`'s job, not this function's.
+
+    A boundary edge is one used by exactly one triangle (an interior
+    edge is always shared by exactly two) -- deterministic, no
+    heuristics. Loops are found by walking the boundary-edge
+    adjacency graph; assumes a clean 2-manifold-with-boundary
+    triangulation (each boundary vertex touches exactly 2 boundary
+    edges), true for any triangulation gmsh or a simple grid produces.
+    """
+    edge_count: dict[tuple[int, int], int] = defaultdict(int)
+    for tri in triangles:
+        for a, b in ((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])):
+            key = (a, b) if a < b else (b, a)
+            edge_count[key] += 1
+    boundary_edges = [e for e, count in edge_count.items() if count == 1]
+
+    adjacency: dict[int, list[int]] = defaultdict(list)
+    for a, b in boundary_edges:
+        adjacency[a].append(b)
+        adjacency[b].append(a)
+
+    loops: list[list[int]] = []
+    visited: set[int] = set()
+    for start in adjacency:
+        if start in visited:
+            continue
+        loop = [start]
+        visited.add(start)
+        prev, current = None, start
+        while True:
+            neighbors = [n for n in adjacency[current] if n != prev]
+            next_vertex = next((n for n in neighbors if n not in visited), None)
+            if next_vertex is None:
+                break  # closed the loop back to `start`
+            loop.append(next_vertex)
+            visited.add(next_vertex)
+            prev, current = current, next_vertex
+        loops.append(loop)
+    return loops
+
+
+def _polygon_area(xy: np.ndarray, loop: list[int]) -> float:
+    """Shoelace formula; works for any simple polygon, convex or not."""
+    pts = xy[loop]
+    x, y = pts[:, 0], pts[:, 1]
+    return float(abs(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)) / 2.0)
+
+
+def classify_boundary_loops(xy: np.ndarray, triangles: np.ndarray) -> tuple[list[int], list[list[int]]]:
+    """Split boundary loops into (outer perimeter, [hole loops]).
+
+    The outer loop is the one enclosing the largest area -- a sound
+    (not heuristic) rule: any interior hole's loop necessarily
+    encloses less area than the boundary that contains it, since the
+    outer loop's enclosed region is a strict superset (the hole's
+    footprint plus the material around it).
+    """
+    loops = find_boundary_loops(triangles)
+    if not loops:
+        raise ValueError("no boundary loops found -- is this triangulation closed with no perimeter at all?")
+    areas = [_polygon_area(xy, loop) for loop in loops]
+    outer_index = int(np.argmax(areas))
+    outer = loops[outer_index]
+    holes = [loop for i, loop in enumerate(loops) if i != outer_index]
+    return outer, holes
+
+
+@dataclass(frozen=True)
+class ExtrudedPrismMesh:
+    """Result of `extrude_shell_to_prisms`."""
+
+    nodes: np.ndarray  # (n, 3) 3D coordinates
+    elements: np.ndarray  # (num_layers * len(triangles), 15) 1-indexed node IDs
+    corner_node_ids: np.ndarray  # (num_layers + 1, V) node ID at each (level, in-plane vertex)
+
+
+def extrude_shell_to_prisms(shell: ShellMesh, num_layers: int) -> ExtrudedPrismMesh:
     """Stack `num_layers` C3D15 (15-node quadratic wedge) elements
     between `shell`'s bottom and top surfaces.
 
-    Returns (nodes, elements): `nodes` is an (n, 3) array of 3D
-    coordinates; `elements` is an (num_layers * len(triangles), 15)
-    array of 1-indexed node IDs in CalculiX's own C3D15 order
-    (verified against calculix/examples/elements/C3D15.inp, not
-    assumed): 1-3 bottom corners, 4-6 top corners (directly above
-    1-3), 7-9 bottom mid-edges (1-2, 2-3, 3-1), 10-12 top mid-edges
-    (4-5, 5-6, 6-4), 13-15 vertical mid-edges (1-4, 2-5, 3-6).
+    `elements` is a (num_layers * len(triangles), 15) array of
+    1-indexed node IDs in CalculiX's own C3D15 order (verified against
+    calculix/examples/elements/C3D15.inp, not assumed): 1-3 bottom
+    corners, 4-6 top corners (directly above 1-3), 7-9 bottom
+    mid-edges (1-2, 2-3, 3-1), 10-12 top mid-edges (4-5, 5-6, 6-4),
+    13-15 vertical mid-edges (1-4, 2-5, 3-6).
+
+    `corner_node_ids` lets callers (e.g. boundary-condition writers)
+    map an in-plane vertex index at a given extrusion level back to
+    its global node ID -- needed to fix an outer-edge node across
+    every layer, not just one face.
     """
     V = len(shell.xy)
     N = num_layers
@@ -115,7 +200,9 @@ def extrude_shell_to_prisms(shell: ShellMesh, num_layers: int) -> tuple[np.ndarr
                 ]
             )
 
-    return np.array(node_list), np.array(elements, dtype=np.int64)
+    return ExtrudedPrismMesh(
+        nodes=np.array(node_list), elements=np.array(elements, dtype=np.int64), corner_node_ids=corner_id
+    )
 
 
 def write_shell_frequency_inp(
@@ -124,16 +211,30 @@ def write_shell_frequency_inp(
     num_layers: int,
     inp_path: Path,
     n_frequencies: int = 10,
+    fixed_edge: bool = False,
 ) -> int:
-    """Write a free-free `*FREQUENCY` CalculiX `.inp` from a
-    multi-layer C3D15 extrusion of `shell`. Returns the element count.
+    """Write a `*FREQUENCY` CalculiX `.inp` from a multi-layer C3D15
+    extrusion of `shell`. Returns the element count.
+
+    `fixed_edge=False` (default) is the free-free case: no supports at
+    all, used for the mesh/material validation ladder so far.
+
+    `fixed_edge=True` clamps every node (all translational DOFs 1,2,3
+    -- solid elements have no rotational DOFs, so there's nothing else
+    to fix) on the shell's OUTER perimeter, across every extrusion
+    layer, not just one face. The outer perimeter is found via
+    `classify_boundary_loops`, which distinguishes it from any
+    interior hole (e.g. a soundhole) by enclosed area -- the hole's
+    loop is always smaller since the outer loop's region is a strict
+    superset. Interior-hole nodes are deliberately left unconstrained.
 
     Orientation is currently identity (same known gap as
     write_frequency_inp_orthotropic in mesh.py -- grain rotation isn't
     wired through yet, tracked separately as a fast-follow).
     """
     validate_positive_definite(material)
-    nodes, elements = extrude_shell_to_prisms(shell, num_layers)
+    prisms = extrude_shell_to_prisms(shell, num_layers)
+    nodes, elements, corner_node_ids = prisms.nodes, prisms.elements, prisms.corner_node_ids
     e1, e2, e3, nu12, nu13, nu23, g12, g13, g23 = to_calculix_engineering_constants(material)
 
     lines = [
@@ -159,8 +260,18 @@ def write_shell_frequency_inp(
         "*DENSITY",
         f"{material.density:.10g}",
         f"*SOLID SECTION, ELSET=Evolumes, MATERIAL={material.name}, ORIENTATION=GrainAxes",
-        *_frequency_step_cards(n_frequencies),
     ]
+
+    if fixed_edge:
+        outer_loop, _hole_loops = classify_boundary_loops(shell.xy, shell.triangles)
+        fixed_node_ids = sorted({int(corner_node_ids[level, v]) for level in range(num_layers + 1) for v in outer_loop})
+        lines.append("*NSET, NSET=Nfixed")
+        for i in range(0, len(fixed_node_ids), 10):
+            lines.append(", ".join(str(n) for n in fixed_node_ids[i : i + 10]))
+        lines.append("*BOUNDARY")
+        lines.append("Nfixed, 1, 3")
+
+    lines += _frequency_step_cards(n_frequencies)
     Path(inp_path).write_text("\n".join(lines) + "\n")
     return len(elements)
 
