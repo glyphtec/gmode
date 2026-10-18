@@ -24,6 +24,7 @@ from pathlib import Path
 
 from soundboard_lab.materials import SPRUCE_PLACEHOLDER, NonPhysicalMaterialError, validate_positive_definite
 from soundboard_lab.mesh import mesh_surface, write_frequency_inp_orthotropic
+from soundboard_lab.repair import MeshRepairError, repair_stl
 from soundboard_lab.solver import CcxError, parse_eigenfrequencies, run_ccx
 
 MIN_THROUGH_THICKNESS_LAYERS = 2
@@ -64,10 +65,13 @@ def run_analysis(
     if thickness_hint is not None:
         check_through_thickness_layers(element_size, thickness_hint)
 
-    mesh = mesh_surface(stl_path, element_size=element_size)
+    work_dir = output_json.parent
+    repaired_stl = work_dir / "repaired.stl"
+    repair_report = repair_stl(stl_path, repaired_stl)
+
+    mesh = mesh_surface(repaired_stl, element_size=element_size)
     tetra_count = next(c.data.shape[0] for c in mesh.cells if c.type == "tetra10")
 
-    work_dir = output_json.parent
     inp_path = work_dir / "analysis.inp"
     write_frequency_inp_orthotropic(mesh, material, inp_path, n_frequencies=n_frequencies)
 
@@ -79,6 +83,11 @@ def run_analysis(
         "material_name": material.name,
         "tetra_count": tetra_count,
         "modes": [{"mode_number": m.mode_number, "frequency_hz": m.frequency_hz} for m in modes],
+        "mesh_repair": {
+            "was_already_valid": repair_report.was_already_valid,
+            "problems_found": repair_report.problems_found,
+            "components_removed": repair_report.components_removed,
+        },
     }
     output_json.write_text(json.dumps(result, indent=2))
 
@@ -103,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             thickness_hint=args.thickness_hint,
         )
         return 0
-    except (NonPhysicalMaterialError, CcxError, ValueError, FileNotFoundError) as exc:
+    except (NonPhysicalMaterialError, CcxError, MeshRepairError, ValueError, FileNotFoundError) as exc:
         # Known, expected failure modes -- write a clean error result
         # rather than letting the addon see only a nonzero exit code.
         args.output_json.write_text(
