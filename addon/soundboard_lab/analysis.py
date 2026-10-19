@@ -90,19 +90,32 @@ def find_soundboard_object(context) -> bpy.types.Object:
 
 def export_triangulated_stl(context, obj: bpy.types.Object, stl_path: Path) -> int:
     """Write `obj`'s evaluated (modifiers applied), triangulated mesh
-    as an ASCII STL. Returns the triangle count.
+    as an ASCII STL, in WORLD space. Returns the triangle count.
 
     Uses the depsgraph-evaluated mesh (not `obj.data` directly) so
     modifiers on the actual modeled object are respected, not just on
     a bare base mesh -- matters for testing a real modeled object
     rather than a trivial primitive.
+
+    Applies `matrix_world` to every vertex: `mesh.vertices[i].co` is
+    LOCAL (object-space), not world-space. Without this, any object
+    with a non-identity transform (rotated, moved off the origin, or
+    unapplied scale -- all completely normal in a real modeled scene,
+    not an edge case) would silently export geometrically wrong
+    geometry with no error at all. Caught empirically: a real-world
+    test object exported this way, before the fix, came out with a
+    ~490-unit Z span instead of its true ~2mm thickness, because its
+    object transform rotates its local "thin" axis away from world Z.
     """
     depsgraph = context.evaluated_depsgraph_get()
     eval_obj = obj.evaluated_get(depsgraph)
     mesh = eval_obj.to_mesh()
     try:
         mesh.calc_loop_triangles()
-        triangles = [[tuple(mesh.vertices[i].co) for i in tri.vertices] for tri in mesh.loop_triangles]
+        matrix_world = eval_obj.matrix_world
+        triangles = [
+            [tuple(matrix_world @ mesh.vertices[i].co) for i in tri.vertices] for tri in mesh.loop_triangles
+        ]
     finally:
         eval_obj.to_mesh_clear()
 

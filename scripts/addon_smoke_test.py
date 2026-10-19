@@ -10,6 +10,7 @@ sys.path.insert(0, r"C:\GlyphstoneCloud\CloudStation\LocalDev\gmode\addon")
 import bmesh
 import bpy
 import soundboard_lab as addon
+from pathlib import Path
 
 print("=== Soundboard Lab smoke test: register ===")
 addon.register()
@@ -97,6 +98,49 @@ result = bpy.ops.soundboard.align_grain_to_edge()
 assert result == {'FINISHED'}, f"align_grain_to_edge returned {result}"
 assert tuple(obj.soundboard_lab.grain_rotation) != (0.0, 0.0, 0.0), "grain not aligned to edge"
 bpy.ops.object.mode_set(mode='OBJECT')
+
+# --- export_triangulated_stl: must bake world transform, not local ---
+# Real bug, caught via a real round-trip test with the user: a rotated
+# +translated object's exported geometry came out wrong (local-space
+# coordinates, e.g. its thin axis in the wrong direction) because
+# `mesh.vertices[i].co` is local/object-space and was never multiplied
+# by `matrix_world`. A non-identity transform (rotated, moved off
+# origin) is completely normal for a real modeled object, not an edge
+# case -- this must be verified, not just assumed fixed. Non-uniform
+# scale on each axis (not a symmetric cube) matters here: a symmetric
+# cube's bounding box is unchanged by a 90-degree rotation, so it
+# wouldn't actually catch a missing/wrong rotation, only a missing
+# translation.
+import math
+
+bpy.ops.mesh.primitive_cube_add(size=2.0)  # local bounds: [-1, 1]^3
+transformed_obj = bpy.context.active_object
+transformed_obj.scale = (1.0, 2.0, 4.0)  # local bounds become X:[-1,1] Y:[-2,2] Z:[-4,4]
+transformed_obj.location = (10.0, 20.0, 30.0)
+transformed_obj.rotation_euler = (math.radians(90), 0.0, 0.0)  # Rx(90): (x,y,z) -> (x,-z,y)
+bpy.context.view_layer.update()
+
+stl_path = Path(bpy.app.tempdir) / "transform_check.stl"
+tri_count = addon.analysis.export_triangulated_stl(bpy.context, transformed_obj, stl_path)
+assert tri_count == 12, f"expected 12 triangles for a cube, got {tri_count}"
+
+stl_text = stl_path.read_text()
+vertex_lines = [line for line in stl_text.splitlines() if line.strip().startswith("vertex")]
+coords = [[float(n) for n in line.split()[1:4]] for line in vertex_lines]
+xs, ys, zs = zip(*coords)
+world_bounds_min = (min(xs), min(ys), min(zs))
+world_bounds_max = (max(xs), max(ys), max(zs))
+# Scale (1,2,4) then Rx(90) [(x,y,z)->(x,-4z,2y)] then translate (10,20,30):
+# world X = x+10 in [9,11]; world Y = -4z+20 in [16,24]; world Z = 2y+30 in [28,32].
+expected_min = (9.0, 16.0, 28.0)
+expected_max = (11.0, 24.0, 32.0)
+assert all(abs(a - b) < 1e-4 for a, b in zip(world_bounds_min, expected_min)), (
+    f"exported STL is not in world space: got min {world_bounds_min}, expected {expected_min}"
+)
+assert all(abs(a - b) < 1e-4 for a, b in zip(world_bounds_max, expected_max)), (
+    f"exported STL is not in world space: got max {world_bounds_max}, expected {expected_max}"
+)
+print("export_triangulated_stl world-transform check passed")
 
 # --- Analysis & Solve: real end-to-end subprocess pipeline ---
 # Unlike the gizmo, this needs no window manager -- it's just
