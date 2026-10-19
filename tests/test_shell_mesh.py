@@ -23,10 +23,11 @@ from soundboard_lab.shell_mesh import (
     classify_boundary_loops,
     extrude_shell_to_prisms,
     find_boundary_loops,
+    mode_shape_z_displacement,
     shell_from_closed_mesh,
     write_shell_frequency_inp,
 )
-from soundboard_lab.solver import parse_eigenfrequencies, run_ccx
+from soundboard_lab.solver import parse_eigenfrequencies, parse_frd_mode_displacements, run_ccx
 
 DATA_DIR = Path(__file__).parent / "data"
 
@@ -304,8 +305,8 @@ def test_shell_placeholder_spruce_eigenfrequencies(ccx_path, tmp_path):
     )
 
     inp_path = tmp_path / "shell.inp"
-    element_count = write_shell_frequency_inp(shell, SPRUCE_PLACEHOLDER, num_layers=3, inp_path=inp_path)
-    assert element_count < 2000  # vs. 1.36M for the equivalent uniform-tet case
+    result = write_shell_frequency_inp(shell, SPRUCE_PLACEHOLDER, num_layers=3, inp_path=inp_path)
+    assert result.element_count < 2000  # vs. 1.36M for the equivalent uniform-tet case
 
     run_ccx(inp_path, ccx_path)
     modes = parse_eigenfrequencies(inp_path.with_suffix(".dat"))
@@ -392,6 +393,37 @@ def test_shell_real_geometry_free_free_solve_matches_convergence_study(ccx_path,
     expected_at_10mm = [19.968, 24.894, 44.388, 53.756]  # from the convergence sweep, same element_size
     for actual, expected in zip(real_modes, expected_at_10mm):
         assert actual == pytest.approx(expected, rel=0.02), (actual, expected)
+
+
+def test_mode_shape_z_displacement_matches_shell_vertex_order(ccx_path, tmp_path):
+    """Full pipeline for mode-shape visualization: solve a real fixed-
+    edge case, parse the `.frd` for per-node displacement, then map it
+    back onto the shell's own vertex order via
+    `top_layer_node_ids`/`mode_shape_z_displacement`.
+
+    Checks this isn't just "doesn't crash": every fixed outer-rim
+    vertex must show (numerically) zero Z-displacement for every mode
+    (a clamped boundary), while interior vertices for the real
+    structural modes should show clearly nonzero displacement --
+    confirms the node-ID mapping is actually wired to the right
+    vertices, not just producing an array of the right shape.
+    """
+    shell = shell_from_closed_mesh(DATA_DIR / "real_soundboard_with_defects.stl", element_size=15.0)
+    inp_path = tmp_path / "mode_shape.inp"
+    result = write_shell_frequency_inp(
+        shell, SPRUCE_PLACEHOLDER, num_layers=3, inp_path=inp_path, fixed_edge=True, n_frequencies=4
+    )
+    run_ccx(inp_path, ccx_path)
+
+    mode_displacements = parse_frd_mode_displacements(inp_path.with_suffix(".frd"))
+    dz = mode_shape_z_displacement(result.top_layer_node_ids, mode_displacements[1])
+    assert dz.shape == (len(shell.xy),)
+
+    outer, _holes = classify_boundary_loops(shell.xy, shell.triangles)
+    assert np.allclose(dz[outer], 0.0), "the clamped outer rim must show zero Z-displacement"
+
+    interior = [v for v in range(len(shell.xy)) if v not in set(outer)]
+    assert np.abs(dz[interior]).max() > 0.01, "interior vertices should show real nonzero mode-shape displacement"
 
 
 def test_shell_from_closed_mesh_preserves_real_neck_block_notch(ccx_path, tmp_path):

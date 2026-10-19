@@ -139,3 +139,76 @@ def parse_eigenfrequencies(dat_path: Path) -> list[EigenMode]:
             stderr="",
         )
     return modes
+
+
+_MODE_HEADER = re.compile(r"^\s*1PMODE\s+(\d+)")
+_FIELD_HEADER = re.compile(r"^\s*-4\s+(\S+)")
+
+
+def parse_frd_mode_displacements(frd_path: Path) -> dict[int, dict[int, tuple[float, float, float]]]:
+    """Extract per-node (dx, dy, dz) displacement vectors for every
+    eigenmode from a ccx `.frd` results file -- needed to drive a
+    mode-shape heat-map visualization (the `.dat` file this module
+    already parses only has the scalar frequency table, not per-node
+    displacement).
+
+    `.frd`'s ASCII data rows are FIXED-WIDTH, not whitespace-separated:
+    a negative value's sign occupies the space a positive value's
+    leading space would otherwise use, so e.g.
+    " -1         2-1.42753E+02 1.34402E+02-9.59741E+01" would
+    naively `.split()` into garbled tokens (the minus sign gets fused
+    onto the end of the previous field). Verified empirically against
+    a real multi-mode `.frd` file (not assumed from documentation):
+    column layout is `" -1"` (3 chars) + node ID (10 chars) + one
+    12-char field per component.
+
+    Each eigenmode's own result section can contain multiple fields
+    (DISP, STRESS, TOSTRAIN, a scalar like MAXSHEAR, ...) per the
+    `*EL FILE`/`*NODE FILE` output requests in the `.inp` that produced
+    it; only the "DISP" field block is captured here, found by its
+    `-4  DISP` sub-header immediately followed by `-5` component-name
+    lines, then `-1`-prefixed data rows, terminated by a `-3` line.
+    """
+    text = Path(frd_path).read_text()
+    lines = text.splitlines()
+
+    results: dict[int, dict[int, tuple[float, float, float]]] = {}
+    current_mode: int | None = None
+    in_disp_block = False
+    current_displacements: dict[int, tuple[float, float, float]] = {}
+
+    for line in lines:
+        mode_match = _MODE_HEADER.match(line)
+        if mode_match is not None:
+            current_mode = int(mode_match.group(1))
+            continue
+
+        field_match = _FIELD_HEADER.match(line)
+        if field_match is not None:
+            in_disp_block = field_match.group(1) == "DISP"
+            if in_disp_block:
+                current_displacements = {}
+            continue
+
+        if not in_disp_block:
+            continue
+
+        if line.startswith(" -1"):
+            node_id = int(line[3:13])
+            dx = float(line[13:25])
+            dy = float(line[25:37])
+            dz = float(line[37:49])
+            current_displacements[node_id] = (dx, dy, dz)
+        elif line.startswith(" -3"):
+            if current_mode is not None:
+                results[current_mode] = current_displacements
+            in_disp_block = False
+
+    if not results:
+        raise CcxError(
+            f"No DISP results found in {Path(frd_path).name} -- was *NODE FILE / U requested?",
+            returncode=0,
+            stdout=text,
+            stderr="",
+        )
+    return results

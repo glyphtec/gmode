@@ -532,6 +532,29 @@ def extrude_shell_to_prisms(shell: ShellMesh, num_layers: int) -> ExtrudedPrismM
     )
 
 
+@dataclass(frozen=True)
+class ShellInpWriteResult:
+    """Result of `write_shell_frequency_inp`."""
+
+    element_count: int
+    top_layer_node_ids: np.ndarray  # (V,) FEA node ID for each shell.xy/shell.triangles vertex --
+    # needed to map a solved mode's per-node displacement (from
+    # solver.parse_frd_mode_displacements) back onto the shell's own
+    # footprint for a mode-shape visualization.
+
+
+def mode_shape_z_displacement(
+    top_layer_node_ids: np.ndarray, mode_displacements: dict[int, tuple[float, float, float]]
+) -> np.ndarray:
+    """Look up the Z-displacement component for every shell vertex, in
+    `shell.xy`/`shell.triangles` order, from one eigenmode's
+    {node_id: (dx, dy, dz)} dict (`solver.parse_frd_mode_displacements`
+    output for a single mode) -- the per-vertex array a mode-shape
+    heat-map visualization needs.
+    """
+    return np.array([mode_displacements[int(node_id)][2] for node_id in top_layer_node_ids])
+
+
 def write_shell_frequency_inp(
     shell: ShellMesh,
     material: OrthotropicWoodMaterial,
@@ -539,9 +562,9 @@ def write_shell_frequency_inp(
     inp_path: Path,
     n_frequencies: int = 10,
     fixed_edge: bool = False,
-) -> int:
+) -> ShellInpWriteResult:
     """Write a `*FREQUENCY` CalculiX `.inp` from a multi-layer C3D15
-    extrusion of `shell`. Returns the element count.
+    extrusion of `shell`. Returns a `ShellInpWriteResult`.
 
     `fixed_edge=False` (default) is the free-free case: no supports at
     all, used for the mesh/material validation ladder so far.
@@ -600,5 +623,5 @@ def write_shell_frequency_inp(
 
     lines += _frequency_step_cards(n_frequencies)
     Path(inp_path).write_text("\n".join(lines) + "\n")
-    return len(elements)
+    return ShellInpWriteResult(element_count=len(elements), top_layer_node_ids=corner_node_ids[num_layers, :].copy())
 

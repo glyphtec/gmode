@@ -184,6 +184,34 @@ assert bpy.context.scene.soundboard_lab_status == 'ERROR'
 assert bpy.context.scene.soundboard_lab_message == "synthetic test error"
 assert len(bpy.context.scene.soundboard_lab_results) == 0
 
+# --- Mode-shape heat-map preview: static Color Attribute on a real object ---
+# Not an animated/exaggerated deformation (explicitly not wanted, per the
+# user) -- a real 3D mesh object with a Z-displacement heat map, viewable
+# from any angle. Synthetic 4-vertex case with a known gradient: exact
+# min/mid/max colors are checked, not just "didn't crash".
+preview_xy = [[0, 0], [1, 0], [1, 1], [0, 1]]
+preview_top_z = [0.0, 0.0, 0.0, 0.0]
+preview_triangles = [[0, 1, 2], [0, 2, 3]]
+preview_dz = [-5.0, 0.0, 5.0, -2.5]  # vertex 0 = min (blue), vertex 2 = max (red), vertex 1 = mid (green)
+
+preview_obj = addon.analysis.build_mode_shape_preview(
+    bpy.context, "Smoke Test Mode Preview", preview_xy, preview_top_z, preview_triangles, preview_dz
+)
+assert len(preview_obj.data.vertices) == 4
+assert len(preview_obj.data.polygons) == 2
+color_attr = preview_obj.data.color_attributes["ModeShapeZ"]
+assert tuple(color_attr.data[0].color) == (0.0, 0.0, 1.0, 1.0), "min displacement should be pure blue"
+assert tuple(color_attr.data[1].color) == (0.0, 1.0, 0.0, 1.0), "mid displacement should be pure green"
+assert tuple(color_attr.data[2].color) == (1.0, 0.0, 0.0, 1.0), "max displacement should be pure red"
+
+# Re-calling with the same name must replace, not duplicate, the object.
+addon.analysis.build_mode_shape_preview(
+    bpy.context, "Smoke Test Mode Preview", preview_xy, preview_top_z, preview_triangles, preview_dz
+)
+assert len([o for o in bpy.data.objects if o.name.startswith("Smoke Test Mode Preview")]) == 1
+print("build_mode_shape_preview check passed")
+
+
 # Scene-collection errors: zero candidates, then multiple candidates.
 obj.soundboard_lab.role = 'RIB'
 try:

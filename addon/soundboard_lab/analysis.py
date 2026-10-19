@@ -208,6 +208,117 @@ def poll_solve(handle: dict) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Mode-shape visualization: a static Z-displacement heat map on a real
+# 3D mesh object (not an animated/exaggerated deformation -- explicitly
+# not wanted; a plain color-coded heat map on the real geometry is the
+# goal, viewable from any angle since it's a real object, not a flat
+# projection image).
+# ---------------------------------------------------------------------------
+
+# 5-point blue -> cyan -> green -> yellow -> red ramp (the same
+# rainbow/jet-style convention the FreeCAD FEM reference images use for
+# their own "Displacement Z" heat maps -- not an exact color match
+# requirement, just the same familiar low-to-high convention).
+_JET_CONTROL_POINTS = [
+    (0.00, (0.0, 0.0, 1.0)),
+    (0.25, (0.0, 1.0, 1.0)),
+    (0.50, (0.0, 1.0, 0.0)),
+    (0.75, (1.0, 1.0, 0.0)),
+    (1.00, (1.0, 0.0, 0.0)),
+]
+
+
+def _jet_colormap(t: float) -> tuple[float, float, float]:
+    """Piecewise-linear interpolation through `_JET_CONTROL_POINTS`.
+    `t` is clamped to [0, 1] first (defensive: a displacement array's
+    own min/max define the normalization range by construction, so `t`
+    should already be in range, but a degenerate all-zero array could
+    produce a NaN from 0/0 upstream -- clamping here keeps a garbage
+    input from raising rather than just drawing a slightly wrong color).
+    """
+    t = max(0.0, min(1.0, t))
+    for (t0, c0), (t1, c1) in zip(_JET_CONTROL_POINTS, _JET_CONTROL_POINTS[1:]):
+        if t0 <= t <= t1:
+            local_t = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+            return tuple(a + (b - a) * local_t for a, b in zip(c0, c1))
+    return _JET_CONTROL_POINTS[-1][1]  # unreachable given the clamp above; defensive fallback
+
+
+def _set_viewport_vertex_color_shading():
+    """Best-effort: switch any visible VIEW_3D area to Solid shading
+    with vertex-color display, so the mode-shape heat map is visible
+    with zero material setup (same rationale as docs/CLAUDE.md's
+    "Mesh preview & validation" decision for the mesh-quality heat
+    map). Non-fatal, like `_tag_ui_redraw` -- a window-less context
+    (e.g. this function called from a background script) must not
+    raise just because there's no viewport to update.
+    """
+    try:
+        window = bpy.context.window
+        if window is None:
+            return
+        for area in window.screen.areas:
+            if area.type != 'VIEW_3D':
+                continue
+            for space in area.spaces:
+                if space.type == 'VIEW_3D':
+                    space.shading.type = 'SOLID'
+                    space.shading.color_type = 'VERTEX'
+    except Exception as exc:
+        print(f"Soundboard Lab: viewport shading update failed (non-fatal): {exc!r}")
+
+
+def build_mode_shape_preview(
+    context,
+    name: str,
+    xy: list,
+    top_z: list,
+    triangles: list,
+    z_displacement: list,
+) -> bpy.types.Object:
+    """Build (or replace, if an object of this `name` already exists)
+    a real 3D mesh object -- vertices at `(xy[i][0], xy[i][1], top_z[i])`
+    in WORLD space (matching `export_triangulated_stl`'s world-space
+    convention; this object's own transform is left at identity so the
+    mesh data's own coordinates are used directly, not double-
+    transformed) -- with a per-vertex Color Attribute encoding
+    `z_displacement` via a rainbow colormap, normalized to that mode's
+    own min/max. A real object (not a flat image) can be freely
+    orbited/viewed from any angle in the 3D viewport, which is the
+    actual goal here (an animated/exaggerated deformed shape was
+    explicitly NOT wanted -- a static heat map on the real geometry is
+    "table stakes" and sufficient).
+    """
+    mesh = bpy.data.meshes.get(name)
+    if mesh is not None:
+        mesh.clear_geometry()
+    else:
+        mesh = bpy.data.meshes.new(name)
+
+    vertices = [(x, y, z) for (x, y), z in zip(xy, top_z)]
+    mesh.from_pydata(vertices, [], [tuple(tri) for tri in triangles])
+    mesh.update()
+
+    color_attr = mesh.color_attributes.new(name="ModeShapeZ", type='FLOAT_COLOR', domain='POINT')
+    dz_min, dz_max = min(z_displacement), max(z_displacement)
+    span = dz_max - dz_min
+    for i, dz in enumerate(z_displacement):
+        t = (dz - dz_min) / span if span > 1e-12 else 0.5
+        r, g, b = _jet_colormap(t)
+        color_attr.data[i].color = (r, g, b, 1.0)
+
+    obj = bpy.data.objects.get(name)
+    if obj is None:
+        obj = bpy.data.objects.new(name, mesh)
+        context.collection.objects.link(obj)
+    else:
+        obj.data = mesh
+
+    _set_viewport_vertex_color_shading()
+    return obj
+
+
+# ---------------------------------------------------------------------------
 # Results storage (Scene-level: one active free-free analysis at a time)
 # ---------------------------------------------------------------------------
 
