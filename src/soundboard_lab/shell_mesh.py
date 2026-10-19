@@ -160,17 +160,15 @@ def shell_from_closed_mesh(mesh_path: Path, element_size: float, normal_threshol
 
     rim_xy = side.vertices[:, :2]
     outer_rim, hole_rims = _classify_loops(rim_xy, _loops_from_edges(top_rim_edges))
-    # Resample the rim down toward element_size: the ORIGINAL curve's
-    # point density (inherited from however finely Blender sampled the
-    # bezier curve) has nothing to do with the requested mesh
-    # resolution -- confirmed empirically: without this, gmsh just
-    # reuses every original point as a mesh node directly (a straight
-    # Line between 2 points already closer together than element_size
-    # is never coarsened, only ever subdivided further), producing
-    # ~5x more triangles than element_size alone would suggest.
-    min_spacing = 0.5 * element_size
-    outer_rim = _simplify_rim(rim_xy, outer_rim, min_spacing)
-    hole_rims = [_simplify_rim(rim_xy, hole, min_spacing) for hole in hole_rims]
+    # Simplify toward element_size resolution via curvature-aware
+    # Douglas-Peucker (preserves genuine sharp features -- a real
+    # soundboard outline can deliberately include a sharp-cornered
+    # neck-block intrusion or a Venetian-cutaway apex), plus a
+    # min-spacing safety net against near-duplicate points -- see
+    # `_simplify_rim`'s docstring for the full reasoning.
+    epsilon = 0.5 * element_size
+    outer_rim = _simplify_rim(rim_xy, outer_rim, epsilon)
+    hole_rims = [_simplify_rim(rim_xy, hole, epsilon) for hole in hole_rims]
 
     gmsh.initialize()
     try:
@@ -335,30 +333,70 @@ def classify_boundary_loops(xy: np.ndarray, triangles: np.ndarray) -> tuple[list
     return _classify_loops(xy, find_boundary_loops(triangles))
 
 
-def _simplify_rim(xy: np.ndarray, rim: list[int], min_spacing: float) -> list[int]:
-    """Drop points that are closer to their predecessor than
-    `min_spacing`. Two jobs, one mechanism:
+def _perpendicular_distance(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
+    """Distance from point `p` to the infinite line through `a`, `b`
+    (falls back to point-to-point distance if `a == b`)."""
+    if np.allclose(a, b):
+        return float(np.linalg.norm(p - a))
+    cross_z = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])  # 2D cross product (scalar)
+    return float(abs(cross_z) / np.linalg.norm(b - a))
 
-    1. Near-duplicate removal: a real curve can be locally
-       over-sampled right where it's sharpest (confirmed: a real
-       soundboard outline had 2 consecutive tail-tip points 0.23mm
-       apart against a ~4mm typical spacing), and feeding that
-       straight into gmsh as 2 separate points/lines can produce a
-       razor-thin, technically self-intersecting kink that gmsh's
-       curve loop meshing then rejects outright.
-    2. Resampling toward the target element size: the original rim's
-       point density is inherited from however finely the source curve
-       happened to be sampled (e.g. in Blender), which has nothing to
-       do with the requested FEA mesh resolution -- confirmed
-       empirically: a Line between 2 points already closer together
-       than `element_size` is never coarsened by gmsh, only ever
-       subdivided further, so without this step the boundary alone can
-       force ~5x more triangles than `element_size` would suggest.
 
-    Called with `min_spacing = 0.5 * element_size` for (2); doesn't
-    lose real shape detail at any reasonable target element size,
-    since gmsh will subdivide the remaining longer segments down to
-    `element_size` anyway where finer resolution is actually needed.
+def _douglas_peucker_open(xy: np.ndarray, indices: list[int], epsilon: float) -> list[int]:
+    """Classic open-curve Douglas-Peucker: keep the endpoints, find the
+    point with maximum perpendicular deviation from the chord between
+    them, keep it (and recurse on both halves) if that deviation
+    exceeds `epsilon`, otherwise collapse the whole span to just the
+    endpoints. A genuine sharp corner or notch is, by construction,
+    always the point of maximum deviation from a straight-line
+    approximation, so it survives as long as its deviation exceeds
+    `epsilon` -- unlike simple distance-based pruning, which has no
+    concept of which points are geometrically significant.
+    """
+    if len(indices) < 3:
+        return indices
+    a, b = xy[indices[0]], xy[indices[-1]]
+    deviations = [_perpendicular_distance(xy[i], a, b) for i in indices[1:-1]]
+    max_dev = max(deviations)
+    if max_dev <= epsilon:
+        return [indices[0], indices[-1]]
+    split = deviations.index(max_dev) + 1  # offset back into `indices`
+    left = _douglas_peucker_open(xy, indices[: split + 1], epsilon)
+    right = _douglas_peucker_open(xy, indices[split:], epsilon)
+    return left[:-1] + right  # drop the duplicated shared point at the split
+
+
+def _douglas_peucker_closed_loop(xy: np.ndarray, rim: list[int], epsilon: float) -> list[int]:
+    """Douglas-Peucker is normally defined on an open curve with 2
+    fixed endpoints; a closed loop has none. Standard fix: pick 2
+    anchor points, splitting the loop into 2 open chains, simplify
+    each independently, then recombine. Anchors are point 0 and
+    whichever rim point is farthest from it (an O(n) approximation of
+    the true 2-point diameter, good enough for the reasonably
+    "fat"/non-spiraling outlines this pipeline deals with -- an exact
+    diameter would be O(n^2), unnecessary here).
+    """
+    xy_rim = xy[rim]
+    dists_from_0 = np.linalg.norm(xy_rim - xy_rim[0], axis=1)
+    far_idx = int(np.argmax(dists_from_0))  # index within `rim`, not a vertex ID
+
+    first_chain = rim[: far_idx + 1]
+    second_chain = rim[far_idx:] + [rim[0]]
+    simplified_first = _douglas_peucker_open(xy, first_chain, epsilon)
+    simplified_second = _douglas_peucker_open(xy, second_chain, epsilon)
+    return simplified_first[:-1] + simplified_second[:-1]
+
+
+def _enforce_min_spacing(xy: np.ndarray, rim: list[int], min_spacing: float) -> list[int]:
+    """Drop points closer to their predecessor than `min_spacing" --
+    a safety-net pass run AFTER Douglas-Peucker, not a replacement for
+    it: DP's own deviation tolerance doesn't guarantee a minimum
+    spacing between SURVIVING points (two sufficiently sharp, nearby
+    features could theoretically both survive), and the original bug
+    this whole simplification step exists to prevent -- 2 near-
+    duplicate tail-tip points 0.23mm apart producing a razor-thin
+    self-intersecting kink gmsh's curve-loop meshing then rejected
+    outright -- is about raw spacing, not shape deviation.
     """
     simplified = [rim[0]]
     for v in rim[1:]:
@@ -367,6 +405,33 @@ def _simplify_rim(xy: np.ndarray, rim: list[int], min_spacing: float) -> list[in
     if np.linalg.norm(xy[simplified[-1]] - xy[simplified[0]]) < min_spacing and len(simplified) > 3:
         simplified.pop()  # closing point also collapses into the start
     return simplified
+
+
+def _simplify_rim(xy: np.ndarray, rim: list[int], epsilon: float) -> list[int]:
+    """Simplify a closed rim loop for gmsh geometry construction: a
+    curvature-aware Douglas-Peucker pass (preserves genuine sharp
+    features -- confirmed necessary, not just theoretical: real
+    soundboard outlines deliberately include sharp-cornered features
+    like a neck-block intrusion or a Venetian-cutaway apex, which a
+    naive distance-based method could round off or erase outright --
+    a real risk for the planned body/lining bonding system, not merely
+    cosmetic), followed by a `min_spacing` safety-net pass (see
+    `_enforce_min_spacing`).
+
+    `epsilon` serves double duty, deliberately: it's both the DP
+    deviation tolerance AND (at a smaller fraction) the safety-net
+    spacing floor. Called with `epsilon = 0.5 * element_size`: this
+    keeps the DP-simplified curve's resolution in sync with the FEA
+    mesh's own resolution (a feature smaller than element_size can't
+    be resolved by the mesh anyway, so there's nothing lost by also
+    not preserving it in the boundary curve), while still resampling
+    smooth, densely-sampled regions down toward that same target
+    resolution (confirmed empirically: without this, gmsh reuses
+    whatever point density the original curve happened to have,
+    producing ~5x more triangles than `element_size` alone implies).
+    """
+    simplified = _douglas_peucker_closed_loop(xy, rim, epsilon)
+    return _enforce_min_spacing(xy, simplified, min_spacing=0.1 * epsilon)
 
 
 

@@ -18,6 +18,8 @@ import pytest
 from soundboard_lab.materials import SPRUCE_PLACEHOLDER
 from soundboard_lab.shell_mesh import (
     ShellMesh,
+    _polygon_area,
+    _simplify_rim,
     classify_boundary_loops,
     extrude_shell_to_prisms,
     find_boundary_loops,
@@ -144,6 +146,88 @@ def test_boundary_loops_distinguish_outer_perimeter_from_soundhole():
         np.isclose(hole_xy[:, 1], 40) | np.isclose(hole_xy[:, 1], 60)
     )
     assert on_hole_boundary.all(), "hole loop must only contain hole-boundary vertices, not perimeter vertices"
+
+
+def _square_with_sharp_feature(apex_xy: list[float], apex_direction: str) -> np.ndarray:
+    """A 6x6 square's boundary with a sharp corner feature cut into (or
+    pointing out from) the bottom edge at x=3, surrounded by densely-
+    sampled nearly-collinear points on both sides -- the real torture
+    case for curvature-aware simplification: a naive distance-based
+    method could drop the feature's defining apex vertex just because
+    its neighbors happen to be close together, even though the apex
+    itself is geometrically essential (not just "a bit more detail").
+    `apex_direction` is purely documentation here; the apex_xy value
+    itself determines whether it's an inward notch or outward spike.
+    """
+    pts = [[0.0, 0.0]]
+    for x in [1.0, 2.0, 2.8, 2.9, 2.95]:
+        pts.append([x, 0.0])
+    pts.append(apex_xy)
+    for x in [3.05, 3.1, 3.2]:
+        pts.append([x, 0.0])
+    pts += [[4.0, 0.0], [5.0, 0.0], [6.0, 0.0]]
+    pts += [[6, 2], [6, 4], [6, 6], [4, 6], [2, 6], [0, 6], [0, 4], [0, 2]]
+    return np.array(pts, dtype=float)
+
+
+def test_simplify_rim_preserves_sharp_inward_notch_despite_dense_sampling():
+    """A sharp inward notch -- e.g. a neck-block intrusion modeled as
+    a deliberately sharp-cornered cut, not a smoothly-filleted curve
+    (session history: a real, not hypothetical, modeling choice) --
+    must survive simplification exactly, even though its immediately
+    neighboring points are only ~0.05-0.1 units apart (much closer
+    than the 0.5 epsilon used here), which is exactly the situation
+    where a naive distance-based method could drop the apex.
+    """
+    xy = _square_with_sharp_feature(apex_xy=[3.0, 2.0], apex_direction="inward")
+    rim = list(range(len(xy)))
+    apex_index = 6  # position of [3.0, 2.0] in the array above
+
+    simplified = _simplify_rim(xy, rim, epsilon=0.5)
+    assert apex_index in simplified, "the notch's defining apex vertex must survive simplification"
+    assert _polygon_area(xy, simplified) == pytest.approx(_polygon_area(xy, rim)), (
+        "shape must be preserved exactly when the only real feature is a single sharp notch"
+    )
+
+
+def test_simplify_rim_preserves_sharp_outward_spike_despite_dense_sampling():
+    """The Venetian-cutaway case: a sharp OUTWARD-pointing apex where
+    two curves meet at a point rather than blending smoothly (session
+    history: a real guitar body style, not hypothetical) -- same
+    dense-neighbor torture case as the inward notch, opposite
+    direction.
+    """
+    xy = _square_with_sharp_feature(apex_xy=[3.0, -2.0], apex_direction="outward")
+    rim = list(range(len(xy)))
+    apex_index = 6
+
+    simplified = _simplify_rim(xy, rim, epsilon=0.5)
+    assert apex_index in simplified, "the spike's defining apex vertex must survive simplification"
+    assert _polygon_area(xy, simplified) == pytest.approx(_polygon_area(xy, rim)), (
+        "shape must be preserved exactly when the only real feature is a single sharp spike"
+    )
+
+
+def test_simplify_rim_collapses_collinear_points_to_true_corners():
+    """The complementary case: a plain square with extra collinear
+    points scattered along each straight edge must collapse down to
+    exactly its 4 true corners -- confirms simplification actually
+    simplifies when there's no real detail to preserve, not just that
+    it's safe/conservative.
+    """
+    xy = np.array(
+        [
+            [0, 0], [2, 0], [4, 0], [6, 0],
+            [6, 2], [6, 4], [6, 6],
+            [4, 6], [2, 6], [0, 6],
+            [0, 4], [0, 2],
+        ],
+        dtype=float,
+    )
+    rim = list(range(len(xy)))
+    simplified = _simplify_rim(xy, rim, epsilon=0.1)
+    assert len(simplified) == 4
+    assert set(map(tuple, xy[simplified])) == {(0.0, 0.0), (6.0, 0.0), (6.0, 6.0), (0.0, 6.0)}
 
 
 def test_shell_fixed_edge_eigenfrequencies_are_higher_than_free_free(ccx_path, tmp_path):
@@ -277,12 +361,20 @@ def test_shell_from_closed_mesh_handles_real_defective_geometry():
 def test_shell_real_geometry_free_free_solve_matches_convergence_study(ccx_path, tmp_path):
     """End-to-end solve of the real defective fixture at element_size=10mm
     -- the default recommended by a real mesh-convergence sweep (session
-    history: frequencies changed by <0.1% going from 10mm down to 5mm,
-    while solve time grew ~5x, so 10mm was chosen as the accurate-but-
-    not-wasteful default). Checks the real structural modes land within
-    a couple percent of that sweep's recorded 10mm values, not just
-    that ccx exits cleanly -- confirms the winding fix produces a
-    physically sound solve, not merely a non-crashing one.
+    history: frequencies changed by <1.3% going from 10mm down to 5mm,
+    so 10mm was chosen as the accurate-but-not-wasteful default).
+    Checks the real structural modes land within a couple percent of
+    that sweep's recorded 10mm values, not just that ccx exits cleanly
+    -- confirms the winding fix produces a physically sound solve, not
+    merely a non-crashing one.
+
+    Expected values re-measured after switching `_simplify_rim` to
+    curvature-aware Douglas-Peucker (session history): DP coarsens
+    smooth regions more aggressively than the prior simple
+    distance-based method at the same nominal `element_size` (3715 vs.
+    6101 triangles here), shifting the solved frequencies by ~2% --
+    expected and correct, not a regression, since the convergence
+    trend itself (checked again under DP) still holds.
     """
     shell = shell_from_closed_mesh(DATA_DIR / "real_soundboard_with_defects.stl", element_size=10.0)
     inp_path = tmp_path / "real_free_free.inp"
@@ -297,7 +389,63 @@ def test_shell_real_geometry_free_free_solve_matches_convergence_study(ccx_path,
     real_modes = frequencies[6:]
     assert real_modes == sorted(real_modes), "eigenfrequencies should be strictly increasing"
 
-    expected_at_10mm = [19.553, 24.397, 43.202, 52.772]  # from the convergence sweep, same element_size
+    expected_at_10mm = [19.968, 24.894, 44.388, 53.756]  # from the convergence sweep, same element_size
     for actual, expected in zip(real_modes, expected_at_10mm):
         assert actual == pytest.approx(expected, rel=0.02), (actual, expected)
-    assert real_modes == sorted(real_modes), "eigenfrequencies should be strictly increasing"
+
+
+def test_shell_from_closed_mesh_preserves_real_neck_block_notch(ccx_path, tmp_path):
+    """`real_soundboard_with_neck_block_notch.stl`: a second real,
+    independently-exported file -- same booleaned-soundhole defect
+    pattern as `real_soundboard_with_defects.stl`, but ALSO includes a
+    deliberately sharp-cornered neck-block intrusion (a real luthier
+    modeling choice, not a smoothly-filleted curve -- session history:
+    raised as the actual real-world torture case for curvature-aware
+    simplification, not a hypothetical one).
+
+    Verifies the notch's defining corners survive simplification by
+    checking the outer loop's per-vertex turning angle: the notch's 4
+    true corners are near-right-angle (confirmed manually at ~90-102
+    degrees on this exact file), clearly separated from the smooth
+    body outline's gentle curvature peaks (<40 degrees everywhere
+    else) -- if DP had rounded the notch off, no vertex would show a
+    turn anywhere near 90 degrees.
+
+    Then runs a full free-free + fixed-edge solve to confirm the more
+    complex (notched) outer boundary doesn't just look right but
+    solves cleanly end-to-end.
+    """
+    shell = shell_from_closed_mesh(DATA_DIR / "real_soundboard_with_neck_block_notch.stl", element_size=10.0)
+    xy, triangles = shell.xy, shell.triangles
+    outer, holes = classify_boundary_loops(xy, triangles)
+    assert len(holes) == 1, "the neck-block notch is part of the outer loop, not a second hole"
+
+    pts = xy[outer]
+    n = len(pts)
+    turn_angles = []
+    for i in range(n):
+        incoming = pts[i] - pts[(i - 1) % n]
+        outgoing = pts[(i + 1) % n] - pts[i]
+        incoming_n = incoming / np.linalg.norm(incoming)
+        outgoing_n = outgoing / np.linalg.norm(outgoing)
+        turn_angles.append(np.degrees(np.arccos(np.clip(np.dot(incoming_n, outgoing_n), -1, 1))))
+    turn_angles = np.array(turn_angles)
+
+    sharp_corners = np.sum(turn_angles > 80)
+    assert sharp_corners >= 4, (
+        f"expected at least the neck-block notch's 4 near-right-angle corners to survive, found {sharp_corners}"
+    )
+
+    for fixed_edge in (False, True):
+        inp_path = tmp_path / f"neck_block_notch_fixed_{fixed_edge}.inp"
+        write_shell_frequency_inp(
+            shell, SPRUCE_PLACEHOLDER, num_layers=3, inp_path=inp_path, fixed_edge=fixed_edge
+        )
+        run_ccx(inp_path, ccx_path)
+        modes = parse_eigenfrequencies(inp_path.with_suffix(".dat"))
+        frequencies = [m.frequency_hz for m in modes]
+        assert frequencies == sorted(frequencies), "eigenfrequencies should be strictly increasing"
+        if not fixed_edge:
+            assert all(f < 1.0 for f in frequencies[:6]), f"expected 6 near-zero rigid-body modes, got {frequencies}"
+        else:
+            assert all(f > 1.0 for f in frequencies), f"a clamped edge should have no rigid-body modes, got {frequencies}"
