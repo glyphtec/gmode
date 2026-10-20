@@ -308,19 +308,31 @@ def build_mode_shape_preview(
     top_z: list,
     triangles: list,
     z_displacement: list,
+    surface_offset: float = 0.5,
 ) -> bpy.types.Object:
     """Build (or replace, if an object of this `name` already exists)
-    a real 3D mesh object -- vertices at `(xy[i][0], xy[i][1], top_z[i])`
-    in WORLD space (matching `export_triangulated_stl`'s world-space
-    convention; this object's own transform is left at identity so the
-    mesh data's own coordinates are used directly, not double-
-    transformed) -- with a per-vertex Color Attribute encoding
-    `z_displacement` via a rainbow colormap, normalized to that mode's
-    own min/max. A real object (not a flat image) can be freely
-    orbited/viewed from any angle in the 3D viewport, which is the
-    actual goal here (an animated/exaggerated deformed shape was
-    explicitly NOT wanted -- a static heat map on the real geometry is
-    "table stakes" and sufficient).
+    a real 3D mesh object -- vertices at
+    `(xy[i][0], xy[i][1], top_z[i] + surface_offset)` in WORLD space
+    (matching `export_triangulated_stl`'s world-space convention; this
+    object's own transform is left at identity so the mesh data's own
+    coordinates are used directly, not double-transformed) -- with a
+    per-vertex Color Attribute encoding `z_displacement` via a rainbow
+    colormap, normalized to that mode's own min/max. A real object
+    (not a flat image) can be freely orbited/viewed from any angle in
+    the 3D viewport, which is the actual goal here (an animated/
+    exaggerated deformed shape was explicitly NOT wanted -- a static
+    heat map on the real geometry is "table stakes" and sufficient).
+
+    `surface_offset` nudges the preview mesh slightly above the
+    original soundboard object's own top surface (both occupy the
+    EXACT same world-space Z otherwise, since `top_z` comes directly
+    from the solved shell's real top surface): without it, the two
+    coplanar surfaces Z-fight in the viewport (confirmed in a real
+    GUI session, not hypothetical -- the original object's solid-fill
+    shading and the preview's vertex-color shading flicker against
+    each other). 0.5 is small enough to look "on the surface" at any
+    reasonable zoom for a soundboard-scale object (~2mm thick), while
+    clearly separating the two surfaces in depth.
     """
     mesh = bpy.data.meshes.get(name)
     if mesh is not None:
@@ -328,7 +340,7 @@ def build_mode_shape_preview(
     else:
         mesh = bpy.data.meshes.new(name)
 
-    vertices = [(x, y, z) for (x, y), z in zip(xy, top_z)]
+    vertices = [(x, y, z + surface_offset) for (x, y), z in zip(xy, top_z)]
     mesh.from_pydata(vertices, [], [tuple(tri) for tri in triangles])
     mesh.update()
 

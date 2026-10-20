@@ -238,6 +238,13 @@ assert tuple(color_attr.data[0].color) == (0.0, 0.0, 1.0, 1.0), "min displacemen
 assert tuple(color_attr.data[1].color) == (0.0, 1.0, 0.0, 1.0), "mid displacement should be pure green"
 assert tuple(color_attr.data[2].color) == (1.0, 0.0, 0.0, 1.0), "max displacement should be pure red"
 
+# Real GUI bug, confirmed: the preview mesh sitting at the exact same
+# world-space Z as the original soundboard's top surface Z-fights with
+# it in the viewport. Must sit strictly above the real top_z, not
+# coincide with it.
+for v, expected_top_z in zip(preview_obj.data.vertices, preview_top_z):
+    assert v.co.z > expected_top_z, "preview mesh must be offset above the real top surface, not coincide with it"
+
 # Re-calling with the same name must replace, not duplicate, the object.
 addon.analysis.build_mode_shape_preview(
     bpy.context, "Smoke Test Mode Preview", preview_xy, preview_top_z, preview_triangles, preview_dz
