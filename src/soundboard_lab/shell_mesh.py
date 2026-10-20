@@ -165,8 +165,14 @@ def shell_from_closed_mesh(mesh_path: Path, element_size: float, normal_threshol
     # soundboard outline can deliberately include a sharp-cornered
     # neck-block intrusion or a Venetian-cutaway apex), plus a
     # min-spacing safety net against near-duplicate points -- see
-    # `_simplify_rim`'s docstring for the full reasoning.
-    epsilon = 0.5 * element_size
+    # `_simplify_rim`'s docstring for the full reasoning. 0.25 (not a
+    # looser 0.5) because boundary point density barely affects total
+    # element count -- it only controls near-boundary resolution, not
+    # the interior (still governed by element_size alone) -- verified:
+    # halving epsilon from 0.5x to 0.25x element_size only grew a real
+    # neck-block-notch fixture's mesh from 3478 to 3827 triangles
+    # (~10%), for a visibly smoother boundary.
+    epsilon = 0.25 * element_size
     outer_rim = _simplify_rim(rim_xy, outer_rim, epsilon)
     hole_rims = [_simplify_rim(rim_xy, hole, epsilon) for hole in hole_rims]
 
@@ -420,7 +426,7 @@ def _simplify_rim(xy: np.ndarray, rim: list[int], epsilon: float) -> list[int]:
 
     `epsilon` serves double duty, deliberately: it's both the DP
     deviation tolerance AND (at a smaller fraction) the safety-net
-    spacing floor. Called with `epsilon = 0.5 * element_size`: this
+    spacing floor. Called with `epsilon = 0.25 * element_size`: this
     keeps the DP-simplified curve's resolution in sync with the FEA
     mesh's own resolution (a feature smaller than element_size can't
     be resolved by the mesh anyway, so there's nothing lost by also

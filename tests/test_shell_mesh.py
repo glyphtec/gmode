@@ -372,10 +372,11 @@ def test_shell_real_geometry_free_free_solve_matches_convergence_study(ccx_path,
     Expected values re-measured after switching `_simplify_rim` to
     curvature-aware Douglas-Peucker (session history): DP coarsens
     smooth regions more aggressively than the prior simple
-    distance-based method at the same nominal `element_size` (3715 vs.
-    6101 triangles here), shifting the solved frequencies by ~2% --
-    expected and correct, not a regression, since the convergence
-    trend itself (checked again under DP) still holds.
+    distance-based method at the same nominal `element_size` (3990
+    triangles here, vs. 6101 before DP), shifting the solved
+    frequencies by ~2% -- expected and correct, not a regression,
+    since the convergence trend itself (checked again under DP) still
+    holds.
     """
     shell = shell_from_closed_mesh(DATA_DIR / "real_soundboard_with_defects.stl", element_size=10.0)
     inp_path = tmp_path / "real_free_free.inp"

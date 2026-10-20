@@ -300,10 +300,19 @@ def build_mode_shape_preview(
     mesh.update()
 
     color_attr = mesh.color_attributes.new(name="ModeShapeZ", type='FLOAT_COLOR', domain='POINT')
-    dz_min, dz_max = min(z_displacement), max(z_displacement)
-    span = dz_max - dz_min
+    # Normalize SYMMETRICALLY around zero, not plain (dz-min)/(max-min):
+    # an eigenmode's absolute sign/scale is mathematically arbitrary, so
+    # a mode can easily come back almost entirely one-signed (confirmed
+    # on a real solve: one mode's values ranged -244.6 to +0.18, nearly
+    # all negative). Min/max normalization would then put a CLAMPED
+    # BOUNDARY'S zero displacement near one extreme of the color ramp
+    # instead of the visual middle, making a zero-displacement edge
+    # look like a "hot" region rather than neutral. Symmetric
+    # normalization keeps zero at the same green midpoint regardless of
+    # which way a given mode happens to be signed.
+    bound = max(abs(min(z_displacement)), abs(max(z_displacement)))
     for i, dz in enumerate(z_displacement):
-        t = (dz - dz_min) / span if span > 1e-12 else 0.5
+        t = (dz + bound) / (2 * bound) if bound > 1e-12 else 0.5
         r, g, b = _jet_colormap(t)
         color_attr.data[i].color = (r, g, b, 1.0)
 

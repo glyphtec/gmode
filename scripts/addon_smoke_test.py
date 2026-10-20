@@ -209,6 +209,22 @@ addon.analysis.build_mode_shape_preview(
     bpy.context, "Smoke Test Mode Preview", preview_xy, preview_top_z, preview_triangles, preview_dz
 )
 assert len([o for o in bpy.data.objects if o.name.startswith("Smoke Test Mode Preview")]) == 1
+
+# Asymmetric (one-signed) mode case -- a real, confirmed scenario, not
+# hypothetical: a real solve's mode 1 ranged -244.6 to +0.18, almost
+# entirely negative. Plain min/max normalization would put the
+# clamped boundary's zero displacement near the RED (max) end instead
+# of the visual middle, making a zero-displacement edge look "hot".
+# Symmetric-around-zero normalization must keep zero at green
+# regardless of which way a mode happens to be signed.
+asymmetric_dz = [-10.0, 0.0, 1.0, -5.0]  # bound = max(|-10|, |1|) = 10
+addon.analysis.build_mode_shape_preview(
+    bpy.context, "Smoke Test Asymmetric Mode", preview_xy, preview_top_z, preview_triangles, asymmetric_dz
+)
+asym_attr = bpy.data.objects["Smoke Test Asymmetric Mode"].data.color_attributes["ModeShapeZ"]
+assert tuple(asym_attr.data[1].color) == (0.0, 1.0, 0.0, 1.0), "zero displacement must stay green even when a mode is one-signed"
+assert tuple(asym_attr.data[0].color) == (0.0, 0.0, 1.0, 1.0), "the most-negative vertex should still be pure blue"
+
 print("build_mode_shape_preview check passed")
 
 
