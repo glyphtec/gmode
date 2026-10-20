@@ -209,6 +209,17 @@ assert len(preview_obj.data.vertices) == len(result["mesh_shape"]["xy"])
 assert "ModeShapeZ" in preview_obj.data.color_attributes
 print("Mode selection -> preview rebuild check passed")
 
+# Real GUI bug, confirmed live: a fixed-size surface_offset alone isn't
+# enough -- depth-buffer precision degrades with camera distance, so
+# the same offset that looks fine up close Z-fights again once zoomed
+# out. The real fix is to hide the original soundboard object while a
+# preview is showing (no two coincident solid surfaces on screen at
+# once), and restore it as soon as a new solve starts.
+assert fixture_obj.hide_get(), "soundboard object should be hidden once its mode-shape preview is showing"
+addon.analysis._set_soundboard_visibility(fixture_obj, visible=True)
+assert not fixture_obj.hide_get(), "start_solve restoring visibility should actually unhide the object"
+print("Soundboard visibility hide/restore check passed")
+
 error_result = {"status": "error", "message": "synthetic test error"}
 addon.analysis._apply_result(bpy.context.scene, error_result)
 assert bpy.context.scene.soundboard_lab_status == 'ERROR'

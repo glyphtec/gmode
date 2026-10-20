@@ -164,6 +164,12 @@ def start_solve(context, obj: bpy.types.Object, ccx_path: str, engine_python_pat
             "Engine Python (venv) path is not configured or does not exist (add-on preferences)"
         )
 
+    # Restore the real object's visibility before launching: a previous
+    # solve's mode-shape preview may have hidden it (see
+    # `_set_soundboard_visibility`), and it shouldn't stay hidden while
+    # a brand new solve is running (or if it then errors out).
+    _set_soundboard_visibility(obj, visible=True)
+
     settings = obj.soundboard_lab
     work_dir = Path(tempfile.mkdtemp(prefix="soundboard_lab_"))
     stl_path = work_dir / f"{obj.name}.stl"
@@ -299,6 +305,31 @@ def _set_viewport_vertex_color_shading():
                     space.shading.color_type = 'VERTEX'
     except Exception as exc:
         print(f"Soundboard Lab: viewport shading update failed (non-fatal): {exc!r}")
+
+
+def _set_soundboard_visibility(obj: bpy.types.Object, visible: bool) -> None:
+    """Show/hide the real Soundboard-role object in the viewport.
+
+    `surface_offset` alone (see `build_mode_shape_preview`) only pushes
+    the Z-fighting threshold out to a larger camera distance -- it
+    can't eliminate it, since depth-buffer precision degrades with
+    distance from the camera. Confirmed visually in a real GUI session:
+    clean up close, the same clashing/striping reappears once zoomed
+    out further. The robust fix is to not have two coincident solid
+    surfaces on screen at the same time at all: hide the real object
+    while its mode-shape preview is showing, and restore it as soon as
+    a new solve is kicked off (whether or not that solve succeeds --
+    a stale preview from a *previous* solve shouldn't linger hiding the
+    real object if the new one errors out).
+
+    Non-fatal, like `_set_viewport_vertex_color_shading` -- a missing
+    view-layer entry (e.g. called from a background script context)
+    must not raise and abort the preview/solve flow over this.
+    """
+    try:
+        obj.hide_set(not visible)
+    except Exception as exc:
+        print(f"Soundboard Lab: soundboard visibility update failed (non-fatal): {exc!r}")
 
 
 def build_mode_shape_preview(
@@ -519,6 +550,12 @@ def _update_mode_shape_preview(scene) -> None:
         _last_mesh_shape["triangles"],
         z_displacement,
     )
+    try:
+        soundboard_obj = find_soundboard_object(bpy.context)
+    except SoundboardLabSceneError as exc:
+        print(f"Soundboard Lab: couldn't update soundboard visibility (non-fatal): {exc!r}")
+        return
+    _set_soundboard_visibility(soundboard_obj, visible=False)
 
 
 def _on_selected_mode_index_update(self, context):
