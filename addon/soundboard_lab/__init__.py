@@ -460,6 +460,14 @@ class SOUNDBOARD_PT_boundary(bpy.types.Panel):
         layout.label(text="Point attachments (placeholder)")
 
 
+_STEP_STATUS_ICONS = {
+    'pending': 'RADIOBUT_OFF',
+    'running': 'TIME',
+    'done': 'CHECKMARK',
+    'error': 'ERROR',
+}
+
+
 class SOUNDBOARD_PT_analysis(bpy.types.Panel):
     bl_label = "Analysis & Solve"
     bl_space_type = 'VIEW_3D'
@@ -473,15 +481,35 @@ class SOUNDBOARD_PT_analysis(bpy.types.Panel):
         obj = context.object
         if obj is not None and obj.soundboard_lab.role == 'SOUNDBOARD':
             layout.prop(obj.soundboard_lab, "mesh_element_size")
-            layout.prop(obj.soundboard_lab, "mesh_thickness_hint")
         else:
             layout.label(text="Select a Soundboard-role object")
-        layout.operator(analysis.SOUNDBOARD_OT_analyze_free_free.bl_idname, icon='PLAY')
+        layout.operator(analysis.SOUNDBOARD_OT_analyze.bl_idname, icon='PLAY', text="GO!")
         status = context.scene.soundboard_lab_status
         if status == 'RUNNING':
-            layout.label(text="Solving...", icon='TIME')
+            # Not a numeric progress bar -- ccx itself is an opaque
+            # subprocess call with no fine-grained progress available.
+            # A named-step checklist (pending/running/done/error, with
+            # a clear per-step message) is honest and still useful.
+            col = layout.column(align=True)
+            for step in context.scene.soundboard_lab_steps:
+                icon = _STEP_STATUS_ICONS.get(step.status, 'RADIOBUT_OFF')
+                text = step.label
+                if step.message:
+                    text += f": {step.message}"
+                col.label(text=text, icon=icon)
         elif status == 'ERROR':
             layout.label(text=context.scene.soundboard_lab_message, icon='ERROR')
+
+
+class SOUNDBOARD_UL_mode_results(bpy.types.UIList):
+    """Each row: mode number + frequency. Selecting a row (via the
+    bound `soundboard_lab_selected_mode_index`) rebuilds the Z-
+    displacement heat-map preview for that mode, live, no extra click.
+    """
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        layout.label(text=f"Mode {item.mode_number}")
+        layout.label(text=f"{item.frequency_hz:.4g} Hz")
 
 
 class SOUNDBOARD_PT_results(bpy.types.Panel):
@@ -499,9 +527,12 @@ class SOUNDBOARD_PT_results(bpy.types.Panel):
             layout.label(text="No results yet -- run Analysis & Solve")
             return
         layout.label(text=scene.soundboard_lab_message)
-        col = layout.column()
-        for item in scene.soundboard_lab_results:
-            col.label(text=f"Mode {item.mode_number}: {item.frequency_hz:.4g} Hz")
+        layout.template_list(
+            "SOUNDBOARD_UL_mode_results", "",
+            scene, "soundboard_lab_results",
+            scene, "soundboard_lab_selected_mode_index",
+        )
+        layout.label(text="Select a mode to show its Z-displacement heat map", icon='INFO')
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +587,7 @@ classes = (
     SOUNDBOARD_PT_bonds,
     SOUNDBOARD_PT_boundary,
     SOUNDBOARD_PT_analysis,
+    SOUNDBOARD_UL_mode_results,
     SOUNDBOARD_PT_results,
 )
 

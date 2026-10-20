@@ -168,6 +168,7 @@ def start_solve(context, obj: bpy.types.Object, ccx_path: str, engine_python_pat
     work_dir = Path(tempfile.mkdtemp(prefix="soundboard_lab_"))
     stl_path = work_dir / f"{obj.name}.stl"
     output_json = work_dir / "result.json"
+    status_json = work_dir / "status.json"
     export_triangulated_stl(context, obj, stl_path)
 
     cmd = [
@@ -178,12 +179,44 @@ def start_solve(context, obj: bpy.types.Object, ccx_path: str, engine_python_pat
         "--output-json", str(output_json),
         "--element-size", str(settings.mesh_element_size),
         "--n-frequencies", "10",
+        "--mesh-type", "shell",
+        "--boundary-condition", "fixed_edge",
+        "--num-layers", "3",
+        "--status-json", str(status_json),
     ]
     if settings.mesh_thickness_hint > 0:
         cmd += ["--thickness-hint", str(settings.mesh_thickness_hint)]
 
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    return {"process": process, "output_json": output_json, "work_dir": work_dir, "object_name": obj.name}
+    return {
+        "process": process,
+        "output_json": output_json,
+        "status_json": status_json,
+        "work_dir": work_dir,
+        "object_name": obj.name,
+    }
+
+
+def read_solve_status(handle: dict) -> dict | None:
+    """Return the current step checklist (see cli.py's `StepTracker`)
+    if the subprocess has written one yet, else `None`. Safe to call
+    on every poll tick regardless of whether the subprocess has
+    finished -- independent of `poll_solve`'s own completion check, so
+    the UI can show live step-by-step status while still waiting for
+    the final result. Not a numeric progress bar (ccx itself is an
+    opaque subprocess call with no fine-grained progress available) --
+    a named-step checklist with a clear per-step message instead.
+    """
+    status_json: Path = handle["status_json"]
+    if not status_json.is_file():
+        return None
+    try:
+        return json.loads(status_json.read_text())
+    except (json.JSONDecodeError, OSError):
+        # The subprocess may be mid-write when we poll; a torn read is
+        # expected and transient, not a real error -- just means "no
+        # status to show yet", same as the file not existing at all.
+        return None
 
 
 def poll_solve(handle: dict) -> dict | None:
@@ -337,6 +370,20 @@ class SoundboardLabModeResult(bpy.types.PropertyGroup):
     frequency_hz: bpy.props.FloatProperty(name="Frequency (Hz)")
 
 
+class SoundboardLabStepStatus(bpy.types.PropertyGroup):
+    """One row of the process-step checklist (see cli.py's
+    `StepTracker`) -- not a numeric progress bar, since ccx itself is
+    an opaque subprocess call with no fine-grained progress available;
+    a named-step checklist with per-step status and a clear message if
+    something goes sideways is both honest and actually useful.
+    """
+
+    step_id: bpy.props.StringProperty(name="Step ID")
+    label: bpy.props.StringProperty(name="Step")
+    status: bpy.props.StringProperty(name="Status")  # 'pending' | 'running' | 'done' | 'error'
+    message: bpy.props.StringProperty(name="Message")
+
+
 def _tag_ui_redraw():
     """Same rationale as the grain-rosette gizmo's redraw helper: force
     the N-panel to refresh after background state changes outside the
@@ -361,12 +408,35 @@ def _tag_ui_redraw():
 
 _active_handle = None
 
+# Cached per-solve data the mode-shape preview needs (solved mesh
+# footprint + every mode's per-node Z-displacement) -- not stored as
+# bpy Scene properties, since those don't hold nested Python
+# lists/arrays efficiently; a plain module-level cache is simplest and
+# is read only by the same session's mode-selection handler below.
+_last_mesh_shape = None
+_last_mode_shapes = None
+
+
+def _update_step_status(scene, status: dict) -> None:
+    """Mirror cli.py's step-checklist JSON into
+    `scene.soundboard_lab_steps` for the Analysis panel to display
+    live, called on every poll tick regardless of completion.
+    """
+    scene.soundboard_lab_steps.clear()
+    for step in status.get("steps", []):
+        item = scene.soundboard_lab_steps.add()
+        item.step_id = step.get("id", "")
+        item.label = step.get("label", "")
+        item.status = step.get("status", "pending")
+        item.message = step.get("message", "")
+
 
 def _apply_result(scene, result: dict) -> None:
+    global _last_mesh_shape, _last_mode_shapes
     scene.soundboard_lab_results.clear()
     if result["status"] == "ok":
         scene.soundboard_lab_status = 'DONE'
-        message = f"{result['tetra_count']} elements, {result['material_name']}"
+        message = f"{result['triangle_count']} triangles, {result['material_name']}"
         repair = result.get("mesh_repair")
         if repair is not None:
             if repair["was_already_valid"]:
@@ -381,15 +451,26 @@ def _apply_result(scene, result: dict) -> None:
             item = scene.soundboard_lab_results.add()
             item.mode_number = mode["mode_number"]
             item.frequency_hz = mode["frequency_hz"]
+        _last_mesh_shape = result.get("mesh_shape")
+        _last_mode_shapes = result.get("mode_shapes")
+        scene.soundboard_lab_selected_mode_index = 0
     else:
         scene.soundboard_lab_status = 'ERROR'
         scene.soundboard_lab_message = result.get("message", "Unknown error")
+        _last_mesh_shape = None
+        _last_mode_shapes = None
 
 
 def _poll_timer():
     global _active_handle
     if _active_handle is None:
         return None  # stop; nothing active (shouldn't normally happen)
+
+    status = read_solve_status(_active_handle)
+    if status is not None:
+        _update_step_status(bpy.context.scene, status)
+        _tag_ui_redraw()
+
     try:
         result = poll_solve(_active_handle)
     except SoundboardLabSceneError as exc:
@@ -403,10 +484,42 @@ def _poll_timer():
     return None  # stop the timer
 
 
-class SOUNDBOARD_OT_analyze_free_free(bpy.types.Operator):
-    bl_idname = "soundboard.analyze_free_free"
-    bl_label = "Analyze (Free-Free)"
-    bl_description = "Mesh and solve the Soundboard-role object, unconstrained, via the engine subprocess"
+def _update_mode_shape_preview(scene) -> None:
+    """Rebuild the mode-shape preview object for whichever row is
+    currently selected in the Results UIList. Called from the
+    selected-index `update` callback, so it fires whenever the user
+    clicks a different mode in the list.
+    """
+    if _last_mesh_shape is None or _last_mode_shapes is None:
+        return
+    index = scene.soundboard_lab_selected_mode_index
+    if index < 0 or index >= len(scene.soundboard_lab_results):
+        return
+    item = scene.soundboard_lab_results[index]
+    z_displacement = _last_mode_shapes.get(str(item.mode_number))
+    if z_displacement is None:
+        return
+    build_mode_shape_preview(
+        bpy.context,
+        "Soundboard Mode Shape Preview",
+        _last_mesh_shape["xy"],
+        _last_mesh_shape["top_z"],
+        _last_mesh_shape["triangles"],
+        z_displacement,
+    )
+
+
+def _on_selected_mode_index_update(self, context):
+    _update_mode_shape_preview(self)
+
+
+class SOUNDBOARD_OT_analyze(bpy.types.Operator):
+    bl_idname = "soundboard.analyze"
+    bl_label = "Analyze"
+    bl_description = (
+        "Mesh (shell/extrusion) and solve the Soundboard-role object, fixed at its outer edge, "
+        "via the engine subprocess"
+    )
     bl_options = {'REGISTER'}
 
     @classmethod
@@ -427,6 +540,7 @@ class SOUNDBOARD_OT_analyze_free_free(bpy.types.Operator):
         context.scene.soundboard_lab_status = 'RUNNING'
         context.scene.soundboard_lab_message = ""
         context.scene.soundboard_lab_results.clear()
+        context.scene.soundboard_lab_steps.clear()
         bpy.app.timers.register(_poll_timer, first_interval=0.5)
         self.report({'INFO'}, f"Soundboard Lab: solving '{obj.name}'...")
         return {'FINISHED'}
@@ -439,7 +553,8 @@ class SOUNDBOARD_OT_analyze_free_free(bpy.types.Operator):
 classes = (
     SoundboardLabPreferences,
     SoundboardLabModeResult,
-    SOUNDBOARD_OT_analyze_free_free,
+    SoundboardLabStepStatus,
+    SOUNDBOARD_OT_analyze,
 )
 
 
@@ -447,6 +562,10 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.soundboard_lab_results = bpy.props.CollectionProperty(type=SoundboardLabModeResult)
+    bpy.types.Scene.soundboard_lab_steps = bpy.props.CollectionProperty(type=SoundboardLabStepStatus)
+    bpy.types.Scene.soundboard_lab_selected_mode_index = bpy.props.IntProperty(
+        name="Selected Mode", default=0, update=_on_selected_mode_index_update
+    )
     bpy.types.Scene.soundboard_lab_status = bpy.props.EnumProperty(
         items=[
             ('IDLE', "Idle", "No analysis run yet"),
@@ -460,10 +579,14 @@ def register():
 
 
 def unregister():
-    global _active_handle
+    global _active_handle, _last_mesh_shape, _last_mode_shapes
     _active_handle = None
+    _last_mesh_shape = None
+    _last_mode_shapes = None
     del bpy.types.Scene.soundboard_lab_message
     del bpy.types.Scene.soundboard_lab_status
+    del bpy.types.Scene.soundboard_lab_selected_mode_index
+    del bpy.types.Scene.soundboard_lab_steps
     del bpy.types.Scene.soundboard_lab_results
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

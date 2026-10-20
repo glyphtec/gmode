@@ -145,29 +145,46 @@ print("export_triangulated_stl world-transform check passed")
 # --- Analysis & Solve: real end-to-end subprocess pipeline ---
 # Unlike the gizmo, this needs no window manager -- it's just
 # subprocess launching -- so it can be fully exercised headlessly,
-# including actually running gmsh + ccx for real.
+# including actually running gmsh + ccx for real. Uses the real
+# neck-block-notch fixture (not the synthetic cube) so the shell/
+# extrusion path actually gets exercised on representative geometry
+# (soundhole, sharp notch corners, the known reversed-winding-
+# duplicate defect), not a trivial thick cube.
 import time
 
-obj.soundboard_lab.mesh_element_size = 0.5  # cube is 2 units across
-obj.soundboard_lab.mesh_thickness_hint = 0.0  # skip the layer check here
+obj.soundboard_lab.role = 'NONE'  # free up the sole-Soundboard slot temporarily
+bpy.ops.wm.stl_import(
+    filepath=r"C:\GlyphstoneCloud\CloudStation\LocalDev\gmode\tests\data\real_soundboard_with_neck_block_notch.stl"
+)
+fixture_obj = bpy.context.selected_objects[0]
+fixture_obj.soundboard_lab.role = 'SOUNDBOARD'
+fixture_obj.soundboard_lab.mesh_element_size = 15.0
 
 CCX_EXE = r"C:\Program Files\FreeCAD 1.1\bin\ccx.exe"
 ENGINE_PYTHON = r"C:\GlyphstoneCloud\CloudStation\LocalDev\gmode\.venv\Scripts\python.exe"
 
-assert addon.analysis.find_soundboard_object(bpy.context).name == obj.name
+assert addon.analysis.find_soundboard_object(bpy.context).name == fixture_obj.name
 
-handle = addon.analysis.start_solve(bpy.context, obj, CCX_EXE, ENGINE_PYTHON)
+handle = addon.analysis.start_solve(bpy.context, fixture_obj, CCX_EXE, ENGINE_PYTHON)
 result = None
-for _ in range(120):  # up to ~60s
+for _ in range(600):  # up to ~5 minutes -- real shell-mesh solves can be slow
+    status = addon.analysis.read_solve_status(handle)
     result = addon.analysis.poll_solve(handle)
     if result is not None:
         break
     time.sleep(0.5)
 assert result is not None, "engine subprocess did not finish in time"
-print("Analysis result:", result)
 assert result["status"] == "ok", result
-assert result["tetra_count"] > 1
+assert result["triangle_count"] > 1
 assert len(result["modes"]) == 10
+assert "mesh_shape" in result and "mode_shapes" in result
+assert len(result["mesh_shape"]["xy"]) == len(result["mode_shapes"]["1"])
+print("Shell-path analysis result: status=ok, triangle_count=", result["triangle_count"])
+
+# read_solve_status must have surfaced a real step checklist at some
+# point while the subprocess was running (not just at the very end).
+assert status is not None, "expected at least one non-None step-status read while the solve was in progress"
+assert {s["id"] for s in status["steps"]} == {"repair", "mesh", "write_input", "solve", "parse_results"}
 
 # _apply_result is what the real timer callback uses to populate scene
 # properties (poll_solve itself just returns the raw dict) -- verify
@@ -176,13 +193,30 @@ addon.analysis._apply_result(bpy.context.scene, result)
 assert bpy.context.scene.soundboard_lab_status == 'DONE'
 assert len(bpy.context.scene.soundboard_lab_results) == 10
 assert bpy.context.scene.soundboard_lab_results[0].mode_number == 1
-assert bpy.context.scene.soundboard_lab_results[9].frequency_hz == result["modes"][9]["frequency_hz"]
+# approx, not == : Blender's FloatProperty is 32-bit internally, so an
+# exact round-trip against the original 64-bit JSON value isn't
+# guaranteed once a real (not suspiciously-round) frequency is stored.
+stored_freq = bpy.context.scene.soundboard_lab_results[9].frequency_hz
+expected_freq = result["modes"][9]["frequency_hz"]
+assert abs(stored_freq - expected_freq) < 1e-3 * abs(expected_freq), (stored_freq, expected_freq)
+
+# Selecting a mode (as the UIList binding does via its update callback)
+# must build/replace the real "Soundboard Mode Shape Preview" object.
+bpy.context.scene.soundboard_lab_selected_mode_index = 0
+preview_obj = bpy.data.objects.get("Soundboard Mode Shape Preview")
+assert preview_obj is not None, "selecting a mode should build the mode-shape preview object"
+assert len(preview_obj.data.vertices) == len(result["mesh_shape"]["xy"])
+assert "ModeShapeZ" in preview_obj.data.color_attributes
+print("Mode selection -> preview rebuild check passed")
 
 error_result = {"status": "error", "message": "synthetic test error"}
 addon.analysis._apply_result(bpy.context.scene, error_result)
 assert bpy.context.scene.soundboard_lab_status == 'ERROR'
 assert bpy.context.scene.soundboard_lab_message == "synthetic test error"
 assert len(bpy.context.scene.soundboard_lab_results) == 0
+
+bpy.data.objects.remove(fixture_obj, do_unlink=True)
+obj.soundboard_lab.role = 'SOUNDBOARD'  # restore state the rest of this script expects
 
 # --- Mode-shape heat-map preview: static Color Attribute on a real object ---
 # Not an animated/exaggerated deformation (explicitly not wanted, per the
