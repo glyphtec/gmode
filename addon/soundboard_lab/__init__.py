@@ -449,14 +449,10 @@ class SOUNDBOARD_PT_bodies(bpy.types.Panel):
             return
         layout.prop(obj.soundboard_lab, "role")
         layout.operator(SOUNDBOARD_OT_set_role_lining.bl_idname, icon='MOD_SOFT')
-        layout.separator()
-        layout.template_ID(obj, "active_material", new="material.new")
-        if obj.active_material is not None:
-            _draw_material_fields(layout, obj.active_material)
 
 
 class SOUNDBOARD_PT_grain(bpy.types.Panel):
-    bl_label = "Grain Orientation"
+    bl_label = "Material & Grain Orientation"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Soundboard"
@@ -466,8 +462,15 @@ class SOUNDBOARD_PT_grain(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         obj = context.object
-        if obj is None or obj.soundboard_lab.role not in ORTHOTROPIC_CAPABLE_ROLES:
-            layout.label(text="Select a Soundboard / Rib object")
+        if obj is None:
+            layout.label(text="No active object")
+            return
+        layout.template_ID(obj, "active_material", new="material.new")
+        if obj.active_material is not None:
+            _draw_material_fields(layout, obj.active_material)
+        layout.separator()
+        if obj.soundboard_lab.role not in ORTHOTROPIC_CAPABLE_ROLES:
+            layout.label(text="Select a Soundboard / Rib object for grain orientation")
             return
         if not is_grain_orientable(obj):
             layout.label(text="Assign an Orthotropic material to edit grain orientation")
