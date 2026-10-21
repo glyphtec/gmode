@@ -565,20 +565,8 @@ class SOUNDBOARD_PT_material(bpy.types.Panel):
         _draw_material_fields(layout, mat)
 
 
-class SOUNDBOARD_PT_bonds(bpy.types.Panel):
-    bl_label = "Bonds"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = "Soundboard"
-    bl_parent_id = "SOUNDBOARD_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw(self, context):
-        self.layout.label(text="Bond / tie-completeness status (placeholder)")
-
-
 class SOUNDBOARD_PT_boundary(bpy.types.Panel):
-    bl_label = "Boundary & Attachments"
+    bl_label = "Boundary & Bonds"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Soundboard"
@@ -587,6 +575,15 @@ class SOUNDBOARD_PT_boundary(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        scene = context.scene
+        layout.prop(scene, "soundboard_lab_boundary_condition")
+        if scene.soundboard_lab_boundary_condition == 'BODY_LINING':
+            try:
+                analysis.check_body_lining_boundary_condition(context)
+            except analysis.SoundboardLabSceneError as exc:
+                layout.label(text=str(exc), icon='ERROR')
+
+        layout.separator()
         obj = context.object
         if obj is not None and obj.soundboard_lab.role == 'LINING':
             layout.prop(obj.soundboard_lab, "terminal_condition")
@@ -594,7 +591,9 @@ class SOUNDBOARD_PT_boundary(bpy.types.Panel):
                 layout.prop(obj.soundboard_lab, "terminal_stiffness")
         else:
             layout.label(text="Select a Body / Lining object to configure its terminal condition")
+
         layout.separator()
+        layout.label(text="Bond / tie-completeness status (placeholder)")
         layout.label(text="Point attachments (placeholder)")
 
 
@@ -625,7 +624,6 @@ class SOUNDBOARD_PT_analysis(bpy.types.Panel):
         box = layout.box()
         box.label(text="Global Solution Parameters")
         box.prop(context.scene, "soundboard_lab_n_frequencies")
-        box.prop(context.scene, "soundboard_lab_boundary_condition")
         box.prop(context.scene, "soundboard_lab_num_layers")
 
         layout.operator(analysis.SOUNDBOARD_OT_analyze.bl_idname, icon='PLAY', text="GO!")
@@ -729,7 +727,6 @@ classes = (
     SOUNDBOARD_PT_grain,
     SOUNDBOARD_PT_object_role,
     SOUNDBOARD_PT_material,
-    SOUNDBOARD_PT_bonds,
     SOUNDBOARD_PT_boundary,
     SOUNDBOARD_PT_analysis,
     SOUNDBOARD_UL_mode_results,

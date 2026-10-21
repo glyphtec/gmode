@@ -42,7 +42,7 @@ n_panel_categories = {
 }
 print("Registered Soundboard N-panel panels:", n_panel_categories)
 assert all(cat == "Soundboard" for cat in n_panel_categories.values())
-assert len(n_panel_categories) == 7, f"expected 7 N-panel panels, got {len(n_panel_categories)}"
+assert len(n_panel_categories) == 6, f"expected 6 N-panel panels, got {len(n_panel_categories)}"
 
 # Properties-editor (Object tab) mini-panel.
 assert addon.SOUNDBOARD_PT_object_role.bl_space_type == 'PROPERTIES'
@@ -207,6 +207,40 @@ assert bpy.context.scene.soundboard_lab_num_layers == 3
 bpy.context.scene.soundboard_lab_n_frequencies = 6
 assert bpy.context.scene.soundboard_lab_n_frequencies == 6
 print("Global solution parameters (Scene-level) check passed")
+
+# --- 'Body/Lining' boundary condition: validated, not yet implemented ---
+# check_body_lining_boundary_condition is a no-op unless BODY_LINING is
+# actually selected -- must not raise for the default/other choices.
+addon.analysis.check_body_lining_boundary_condition(bpy.context)
+
+# Deterministic regardless of this machine's own default startup scene
+# (which may carry leftover role assignments from past interactive
+# testing) -- explicitly clear any stray Lining-role objects first.
+for stray in bpy.context.scene.objects:
+    if stray.soundboard_lab.role == 'LINING':
+        stray.soundboard_lab.role = 'NONE'
+
+bpy.context.scene.soundboard_lab_boundary_condition = 'BODY_LINING'
+try:
+    addon.analysis.check_body_lining_boundary_condition(bpy.context)
+    assert False, "expected a SoundboardLabSceneError (no Body/Lining-role object exists yet)"
+except addon.analysis.SoundboardLabSceneError as exc:
+    assert "no body/lining" in str(exc).lower(), str(exc)
+
+# Add a real Body/Lining-role object: the error must now be about it not
+# being implemented yet, not about a missing object.
+lining_obj = bpy.data.objects.new("Lining Test Object", bpy.data.meshes.new("Lining Test Mesh"))
+bpy.context.collection.objects.link(lining_obj)
+lining_obj.soundboard_lab.role = 'LINING'
+try:
+    addon.analysis.check_body_lining_boundary_condition(bpy.context)
+    assert False, "expected a SoundboardLabSceneError (not yet implemented)"
+except addon.analysis.SoundboardLabSceneError as exc:
+    assert "not yet implemented" in str(exc).lower(), str(exc)
+
+bpy.data.objects.remove(lining_obj, do_unlink=True)
+bpy.context.scene.soundboard_lab_boundary_condition = 'FIXED_EDGE'
+print("Body/Lining boundary condition validation check passed")
 
 # --- Add-on prefs fallback cache: survives Blender's own prefs being lost ---
 # Real bug, observed live twice in one session: the ccx/engine-python

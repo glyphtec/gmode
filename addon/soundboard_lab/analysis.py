@@ -163,6 +163,51 @@ def find_soundboard_object(context) -> bpy.types.Object:
     return candidates[0]
 
 
+def find_lining_object(context) -> bpy.types.Object | None:
+    """Like `find_soundboard_object`, but returns `None` rather than
+    raising when none exists -- used only to check whether the
+    'Body/Lining' boundary-condition mode has what it needs, which is
+    an expected, reportable state (not a hard scene-integrity error
+    the way a missing Soundboard is).
+    """
+    candidates = [
+        obj for obj in context.scene.objects
+        if obj.type == 'MESH' and obj.soundboard_lab.role == 'LINING'
+    ]
+    if len(candidates) > 1:
+        names = ", ".join(o.name for o in candidates)
+        raise SoundboardLabSceneError(
+            f"Multiple Body/Lining-role objects found ({names}) -- expects exactly one"
+        )
+    return candidates[0] if candidates else None
+
+
+def check_body_lining_boundary_condition(context) -> None:
+    """Raises `SoundboardLabSceneError` if the scene's Boundary
+    Condition is set to 'Body/Lining' but it can't actually be used
+    yet -- either no Body/Lining-role object exists, or (always, for
+    now) because the bonding system it depends on isn't built yet.
+
+    Deliberately plain/testable, independent of `get_preferences()` --
+    same rationale as `start_solve` taking explicit paths instead of
+    resolving preferences itself (see its own docstring): a headless
+    smoke test can exercise this directly, without needing Blender's
+    formal addon-enable mechanism just to check a scene-state
+    validation that has nothing to do with preferences.
+    """
+    if context.scene.soundboard_lab_boundary_condition != 'BODY_LINING':
+        return
+    if find_lining_object(context) is None:
+        raise SoundboardLabSceneError(
+            "Boundary Condition is set to 'Body/Lining' but no Body/Lining-role "
+            "object was found in the scene"
+        )
+    raise SoundboardLabSceneError(
+        "'Body/Lining' boundary condition is not yet implemented (needs the "
+        "bonding system, in progress) -- choose Fixed Edge or Free for now"
+    )
+
+
 def export_triangulated_stl(context, obj: bpy.types.Object, stl_path: Path) -> int:
     """Write `obj`'s evaluated (modifiers applied), triangulated mesh
     as an ASCII STL, in WORLD space. Returns the triangle count.
@@ -719,10 +764,11 @@ class SOUNDBOARD_OT_analyze(bpy.types.Operator):
 
         try:
             obj = find_soundboard_object(context)
+            check_body_lining_boundary_condition(context)
             prefs = get_preferences(context)
+            scene = context.scene
             material = extract_material(obj.active_material) if obj.active_material is not None else None
             orientation = _compute_grain_orientation(obj)
-            scene = context.scene
             _active_handle = start_solve(
                 context,
                 obj,
@@ -799,7 +845,13 @@ def register():
         name="Boundary Condition",
         items=[
             ('FIXED_EDGE', "Fixed Edge", "Every perimeter node clamped (instrument-mounted analogy)"),
-            ('FREE_FREE', "Free-Free", "No supports at all (bare-plate validation rig analogy)"),
+            ('FREE_FREE', "Free", "No supports at all (bare-plate validation rig analogy)"),
+            (
+                'BODY_LINING', "Body/Lining",
+                "Defers to the Body/Lining-role object's own per-object terminal condition "
+                "(Fixed/Free/Spring) instead of a single scene-wide rule -- advanced use, "
+                "requires a Body/Lining-role object in the scene",
+            ),
         ],
         default='FIXED_EDGE',
     )
