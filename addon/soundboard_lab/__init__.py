@@ -137,25 +137,27 @@ class SoundboardLabMaterialSettings(bpy.types.PropertyGroup):
     # src/soundboard_lab/materials.py -- same names, so extraction is
     # a direct field-for-field copy, not a renaming exercise).
     e_longitudinal: bpy.props.FloatProperty(
-        name="E Longitudinal/grain (MPa)", description="Young's modulus along the grain, MPa", default=13800.0, min=0.0
+        name="Stiffness (E) Longitudinal/grain (MPa)",
+        description="Young's modulus along the grain, MPa", default=13800.0, min=0.0,
     )
     e_radial: bpy.props.FloatProperty(
-        name="E Radial (MPa)", description="Young's modulus across the grain (radial), MPa", default=811.76, min=0.0
+        name="Stiffness (E) Radial (MPa)",
+        description="Young's modulus across the grain (radial), MPa", default=811.76, min=0.0,
     )
     e_tangential: bpy.props.FloatProperty(
-        name="E Tangential (MPa)", description="Young's modulus through-thickness (tangential), MPa",
-        default=593.4, min=0.0,
+        name="Stiffness (E) Tangential (MPa)",
+        description="Young's modulus through-thickness (tangential), MPa", default=593.4, min=0.0,
     )
     g_lr: bpy.props.FloatProperty(
-        name="Shear Modulus G_LR (MPa)", description="Shear modulus, longitudinal-radial plane, MPa",
+        name="Shear (G) LR (MPa)", description="Shear modulus, longitudinal-radial plane, MPa",
         default=828.0, min=0.0,
     )
     g_lt: bpy.props.FloatProperty(
-        name="Shear Modulus G_LT (MPa)", description="Shear modulus, longitudinal-tangential plane, MPa",
+        name="Shear (G) LT (MPa)", description="Shear modulus, longitudinal-tangential plane, MPa",
         default=621.0, min=0.0,
     )
     g_rt: bpy.props.FloatProperty(
-        name="Shear Modulus G_RT (MPa)", description="Shear modulus, radial-tangential plane, MPa",
+        name="Shear (G) RT (MPa)", description="Shear modulus, radial-tangential plane, MPa",
         default=41.4, min=0.0,
     )
     nu_lr: bpy.props.FloatProperty(
@@ -168,7 +170,9 @@ class SoundboardLabMaterialSettings(bpy.types.PropertyGroup):
         name="Poisson Ratio nu_RT", description="Unitless. Stress in R, response in T", default=0.45
     )
     # Isotropic fields.
-    iso_e: bpy.props.FloatProperty(name="E (MPa)", description="Young's modulus, MPa", default=10000.0, min=0.0)
+    iso_e: bpy.props.FloatProperty(
+        name="Stiffness (E) (MPa)", description="Young's modulus, MPa", default=10000.0, min=0.0
+    )
     iso_nu: bpy.props.FloatProperty(name="Poisson Ratio", description="Unitless", default=0.3)
 
 
@@ -509,7 +513,7 @@ def _draw_material_fields(layout, mat: bpy.types.Material) -> None:
 
     if s.kind == 'ORTHOTROPIC':
         box = layout.box()
-        box.label(text="Stiffness (MPa) -- L=longitudinal/grain, R=radial, T=tangential")
+        box.label(text="Stiffness (E), Shear (G), Poisson Ratios -- L=grain, R=radial, T=tangential")
         box.prop(s, "e_longitudinal")
         box.prop(s, "e_radial")
         box.prop(s, "e_tangential")
@@ -519,9 +523,9 @@ def _draw_material_fields(layout, mat: bpy.types.Material) -> None:
         box.prop(s, "nu_lr")
         box.prop(s, "nu_lt")
         box.prop(s, "nu_rt")
-        for name, value in (("E Longitudinal/grain", s.e_longitudinal), ("E Radial", s.e_radial),
-                             ("E Tangential", s.e_tangential), ("Shear Modulus G_LR", s.g_lr),
-                             ("Shear Modulus G_LT", s.g_lt), ("Shear Modulus G_RT", s.g_rt)):
+        for name, value in (("Stiffness (E) Longitudinal/grain", s.e_longitudinal), ("Stiffness (E) Radial", s.e_radial),
+                             ("Stiffness (E) Tangential", s.e_tangential), ("Shear (G) LR", s.g_lr),
+                             ("Shear (G) LT", s.g_lt), ("Shear (G) RT", s.g_rt)):
             if value <= 0:
                 box.label(text=f"{name} must be positive", icon='ERROR')
     else:
@@ -529,7 +533,7 @@ def _draw_material_fields(layout, mat: bpy.types.Material) -> None:
         box.prop(s, "iso_e")
         box.prop(s, "iso_nu")
         if s.iso_e <= 0:
-            box.label(text="E must be positive", icon='ERROR')
+            box.label(text="Stiffness (E) must be positive", icon='ERROR')
         if not (-1.0 < s.iso_nu < 0.5):
             box.label(text="Poisson Ratio must be between -1 and 0.5", icon='ERROR')
     layout.label(text="Full stiffness-tensor validation runs at solve time (see Results & Verification)")
