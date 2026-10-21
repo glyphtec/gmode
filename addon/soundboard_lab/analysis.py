@@ -29,6 +29,78 @@ from mathutils import Vector
 # ---------------------------------------------------------------------------
 
 
+def _prefs_cache_path() -> Path:
+    """Location for the fallback preferences cache -- deliberately
+    OUTSIDE anything tied to this extension's own install/registration
+    state (`bpy.utils.user_resource('CONFIG')` is a stable per-user
+    Blender config directory, independent of which extension repo or
+    install this add-on currently lives under).
+
+    Exists because Blender's own `AddonPreferences` storage has been
+    observed, live, to lose its values across what should be routine
+    dev-reload cycles (disable/enable, or a dev-tooling reinstall) --
+    twice in one session, with "Save Preferences" already clicked and
+    Auto-Save Preferences already on, so this isn't simple user error.
+    The leading theory (not fully confirmed): a dev-reload that
+    uninstalls/reinstalls the extension package can reset Blender's own
+    per-addon preferences entry even though the registered `bl_idname`
+    string itself stays the same. A plain file next to nothing Blender
+    manages sidesteps that entirely.
+    """
+    return Path(bpy.utils.user_resource('CONFIG')) / "soundboard_lab_prefs_cache.json"
+
+
+def _save_prefs_cache(ccx_path: str, engine_python_path: str) -> None:
+    """Best-effort, non-fatal -- a failed cache write must never break
+    the actual preferences field the user just edited."""
+    try:
+        _prefs_cache_path().write_text(json.dumps({"ccx_path": ccx_path, "engine_python_path": engine_python_path}))
+    except Exception as exc:
+        print(f"Soundboard Lab: failed to write prefs cache (non-fatal): {exc!r}")
+
+
+def _load_prefs_cache() -> dict | None:
+    try:
+        cache_path = _prefs_cache_path()
+        if not cache_path.is_file():
+            return None
+        return json.loads(cache_path.read_text())
+    except Exception as exc:
+        print(f"Soundboard Lab: failed to read prefs cache (non-fatal): {exc!r}")
+        return None
+
+
+def _on_prefs_path_update(self, context):
+    _save_prefs_cache(self.ccx_path, self.engine_python_path)
+
+
+def _restore_prefs_from_cache_if_empty():
+    """Deferred (via bpy.app.timers, NOT called directly from
+    register()): `get_preferences()` needs `context.preferences.
+    addons[__package__]`, which Blender populates as part of the
+    formal addon-enable sequence -- confirmed not yet present at the
+    moment register() itself runs (see get_preferences's own
+    docstring). A short-delay one-shot timer runs after that sequence
+    completes, which is the earliest point this can safely run.
+    """
+    try:
+        prefs = get_preferences(bpy.context)
+    except Exception as exc:
+        print(f"Soundboard Lab: couldn't restore prefs from cache (non-fatal): {exc!r}")
+        return None  # don't reschedule; nothing more we can do this session
+    if prefs.ccx_path and prefs.engine_python_path:
+        return None  # already populated -- nothing to restore
+    cached = _load_prefs_cache()
+    if cached is None:
+        return None
+    if not prefs.ccx_path:
+        prefs.ccx_path = cached.get("ccx_path", "")
+    if not prefs.engine_python_path:
+        prefs.engine_python_path = cached.get("engine_python_path", "")
+    print("Soundboard Lab: restored ccx/engine Python paths from the fallback prefs cache")
+    return None
+
+
 class SoundboardLabPreferences(bpy.types.AddonPreferences):
     # Must match the installed package's import name; extensions load
     # under a `bl_ext.<repo>.<pkg_id>` namespace that varies by install
@@ -39,6 +111,7 @@ class SoundboardLabPreferences(bpy.types.AddonPreferences):
         name="CalculiX (ccx) Executable",
         description="Full path to ccx.exe (never resolved via PATH)",
         subtype='FILE_PATH',
+        update=_on_prefs_path_update,
     )
     engine_python_path: bpy.props.StringProperty(
         name="Engine Python (venv)",
@@ -47,6 +120,7 @@ class SoundboardLabPreferences(bpy.types.AddonPreferences):
             "installed; Blender's own bundled Python deliberately does not)"
         ),
         subtype='FILE_PATH',
+        update=_on_prefs_path_update,
     )
 
     def draw(self, context):
@@ -688,6 +762,15 @@ classes = (
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    if not bpy.app.background:
+        # Deferred: context.preferences.addons[__package__] isn't
+        # populated yet at this point in the formal addon-enable
+        # sequence (see _restore_prefs_from_cache_if_empty's own
+        # docstring) -- a short one-shot timer runs just after it is.
+        # Skipped under --background: timers generally don't fire
+        # there anyway (no running event loop), and smoke tests pass
+        # explicit paths directly, never relying on this mechanism.
+        bpy.app.timers.register(_restore_prefs_from_cache_if_empty, first_interval=0.2)
     bpy.types.Scene.soundboard_lab_results = bpy.props.CollectionProperty(type=SoundboardLabModeResult)
     bpy.types.Scene.soundboard_lab_steps = bpy.props.CollectionProperty(type=SoundboardLabStepStatus)
     bpy.types.Scene.soundboard_lab_selected_mode_index = bpy.props.IntProperty(

@@ -208,6 +208,28 @@ bpy.context.scene.soundboard_lab_n_frequencies = 6
 assert bpy.context.scene.soundboard_lab_n_frequencies == 6
 print("Global solution parameters (Scene-level) check passed")
 
+# --- Add-on prefs fallback cache: survives Blender's own prefs being lost ---
+# Real bug, observed live twice in one session: the ccx/engine-python
+# paths in AddonPreferences disappeared across routine dev-reload
+# cycles, even with "Save Preferences" already clicked and Auto-Save
+# Preferences already on -- not user error. This cache (a plain file
+# outside anything Blender's extension-install bookkeeping manages) is
+# the mitigation. Monkeypatch the cache PATH (not the save/load logic)
+# to a tmp file so this test can't clobber the real user's actual
+# cached prefs on this machine.
+_real_prefs_cache_path = addon.analysis._prefs_cache_path
+_test_cache_path = Path(bpy.app.tempdir) / "soundboard_lab_prefs_cache_TEST.json"
+addon.analysis._prefs_cache_path = lambda: _test_cache_path
+try:
+    addon.analysis._save_prefs_cache("C:\\fake\\ccx.exe", "C:\\fake\\python.exe")
+    loaded = addon.analysis._load_prefs_cache()
+    assert loaded == {"ccx_path": "C:\\fake\\ccx.exe", "engine_python_path": "C:\\fake\\python.exe"}, loaded
+    print("Prefs fallback cache save/load check passed")
+finally:
+    addon.analysis._prefs_cache_path = _real_prefs_cache_path
+    if _test_cache_path.is_file():
+        _test_cache_path.unlink()
+
 # --- Analysis & Solve: real end-to-end subprocess pipeline ---
 # Unlike the gizmo, this needs no window manager -- it's just
 # subprocess launching -- so it can be fully exercised headlessly,
