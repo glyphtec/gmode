@@ -19,6 +19,20 @@ import numpy as np
 
 
 @dataclass(frozen=True)
+class IsotropicMaterial:
+    """Isotropic material: single modulus/Poisson ratio, no grain axis
+    (bridge plate, mass loads, generic isotropic bodies -- see
+    docs/CLAUDE.md "Material library": isotropic and orthotropic are
+    distinct kinds with their own field sets, not one shared schema).
+    """
+
+    name: str
+    density: float  # consistent mesh units, e.g. t/mm^3
+    e: float  # MPa
+    nu: float
+
+
+@dataclass(frozen=True)
 class OrthotropicWoodMaterial:
     """Orthotropic material in wood-science L/R/T convention.
 
@@ -42,6 +56,15 @@ class OrthotropicWoodMaterial:
     nu_lr: float  # stress in L, response in R
     nu_lt: float  # stress in L, response in T
     nu_rt: float  # stress in R, response in T
+
+
+# Union of the two physical-material kinds the engine understands. Kept
+# as a plain type alias (not a common base class) -- the two kinds
+# deliberately share no fields (see docs/CLAUDE.md "Material library":
+# isotropic and orthotropic are distinct kinds, not one shared schema),
+# so callers dispatch on `isinstance` rather than relying on shared
+# attributes.
+Material = OrthotropicWoodMaterial | IsotropicMaterial
 
 
 def to_calculix_engineering_constants(
@@ -127,6 +150,83 @@ def validate_positive_definite(m: OrthotropicWoodMaterial) -> None:
         )
 
 
+def validate_isotropic(m: IsotropicMaterial) -> None:
+    """Raise `NonPhysicalMaterialError` for an isotropic material
+    whose constants aren't physically valid. An isotropic stiffness
+    tensor is positive definite iff E > 0 and -1 < nu < 0.5 (the
+    standard bounds; nu == 0.5 is the incompressible limit, excluded
+    since it makes the stiffness tensor singular).
+    """
+    if m.e <= 0:
+        raise NonPhysicalMaterialError(f"{m.name}: E = {m.e} must be positive")
+    if not (-1.0 < m.nu < 0.5):
+        raise NonPhysicalMaterialError(
+            f"{m.name}: nu = {m.nu} must be strictly between -1 and 0.5 for a stable isotropic material"
+        )
+
+
+def validate_material(m: Material) -> None:
+    """Dispatches to whichever kind-specific validator applies.
+    Single entry point so callers (CLI, tests) don't need to
+    `isinstance`-check themselves before validating.
+    """
+    if isinstance(m, OrthotropicWoodMaterial):
+        validate_positive_definite(m)
+    elif isinstance(m, IsotropicMaterial):
+        validate_isotropic(m)
+    else:
+        raise TypeError(f"Unknown material type: {type(m)!r}")
+
+
+def material_to_dict(m: Material) -> dict:
+    """Plain-dict form for JSON transport across the engine/UI
+    subprocess boundary (see docs/CLAUDE.md "Engine/UI boundary" --
+    the addon never imports these dataclasses directly, it writes a
+    JSON file the engine's own CLI reads back via `material_from_dict`).
+    """
+    if isinstance(m, OrthotropicWoodMaterial):
+        return {
+            "kind": "ORTHOTROPIC",
+            "name": m.name,
+            "density": m.density,
+            "e_longitudinal": m.e_longitudinal,
+            "e_radial": m.e_radial,
+            "e_tangential": m.e_tangential,
+            "g_lr": m.g_lr,
+            "g_lt": m.g_lt,
+            "g_rt": m.g_rt,
+            "nu_lr": m.nu_lr,
+            "nu_lt": m.nu_lt,
+            "nu_rt": m.nu_rt,
+        }
+    elif isinstance(m, IsotropicMaterial):
+        return {"kind": "ISOTROPIC", "name": m.name, "density": m.density, "e": m.e, "nu": m.nu}
+    else:
+        raise TypeError(f"Unknown material type: {type(m)!r}")
+
+
+def material_from_dict(d: dict) -> Material:
+    kind = d["kind"]
+    if kind == "ORTHOTROPIC":
+        return OrthotropicWoodMaterial(
+            name=d["name"],
+            density=d["density"],
+            e_longitudinal=d["e_longitudinal"],
+            e_radial=d["e_radial"],
+            e_tangential=d["e_tangential"],
+            g_lr=d["g_lr"],
+            g_lt=d["g_lt"],
+            g_rt=d["g_rt"],
+            nu_lr=d["nu_lr"],
+            nu_lt=d["nu_lt"],
+            nu_rt=d["nu_rt"],
+        )
+    elif kind == "ISOTROPIC":
+        return IsotropicMaterial(name=d["name"], density=d["density"], e=d["e"], nu=d["nu"])
+    else:
+        raise ValueError(f"Unknown material kind: {kind!r}")
+
+
 # Placeholder spruce constants, NOT the project owner's lab-measured
 # values (see module docstring and docs/CLAUDE.md: "Material constants
 # come from her lab-measured library, never hardcoded defaults").
@@ -151,3 +251,17 @@ SPRUCE_PLACEHOLDER = OrthotropicWoodMaterial(
     nu_lt=0.40,
     nu_rt=0.45,
 )
+
+# Generic isotropic placeholder (e.g. for a bridge plate or other
+# non-grain-oriented body) -- deliberately not tied to any specific
+# real material, same "for plumbing validation only" caveat as
+# SPRUCE_PLACEHOLDER above. Roughly representative of a mid-stiffness
+# isotropic solid (a generic epoxy/composite-like material), not meant
+# to model any particular real bridge-plate material.
+ISOTROPIC_PLACEHOLDER = IsotropicMaterial(
+    name="IsotropicPlaceholder",
+    density=1.6e-9,  # 1600 kg/m^3 in t/mm^3
+    e=10000.0,  # MPa
+    nu=0.3,
+)
+

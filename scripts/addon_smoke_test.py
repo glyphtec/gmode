@@ -142,6 +142,72 @@ assert all(abs(a - b) < 1e-4 for a, b in zip(world_bounds_max, expected_max)), (
 )
 print("export_triangulated_stl world-transform check passed")
 
+# --- Material physical properties: fields, defaults, extraction ---
+def approx(a, b, tol=1e-6):
+    # Blender's FloatProperty is 32-bit internally -- a round-tripped
+    # value isn't guaranteed to exactly `==` the original 64-bit
+    # Python/JSON literal for a non-round decimal (confirmed earlier
+    # this session: exact comparison is fragile for real frequency
+    # values too, same underlying reason).
+    return abs(a - b) < tol
+
+
+ortho_mat = bpy.data.materials.new("Test Orthotropic")
+ortho_mat.soundboard_lab.kind = 'ORTHOTROPIC'
+# Defaults should be SPRUCE_PLACEHOLDER's own constants, an editable
+# starting point (not meaningless zeros) -- see docs/CLAUDE.md.
+assert ortho_mat.soundboard_lab.density == 460.0  # exact integer, representable in float32
+assert ortho_mat.soundboard_lab.e_longitudinal == 13800.0
+ortho_dict = addon.extract_material(ortho_mat)
+assert ortho_dict["kind"] == "ORTHOTROPIC"
+assert ortho_dict["name"] == "Test Orthotropic"
+# kg/m^3 -> t/mm^3 conversion (factor 1e-12), matching SPRUCE_PLACEHOLDER's
+# own documented 460 kg/m^3 == 4.6e-10 t/mm^3 exactly.
+assert approx(ortho_dict["density"], 4.6e-10, tol=1e-13), ortho_dict["density"]
+assert ortho_dict["e_longitudinal"] == 13800.0  # MPa, no conversion
+assert approx(ortho_dict["nu_lr"], 0.38)
+
+iso_mat = bpy.data.materials.new("Test Isotropic")
+assert iso_mat.soundboard_lab.kind == 'ISOTROPIC'  # default
+assert iso_mat.soundboard_lab.iso_e == 10000.0
+iso_dict = addon.extract_material(iso_mat)
+assert iso_dict["kind"] == "ISOTROPIC"
+assert iso_dict["name"] == "Test Isotropic"
+# density is a single field shared by both kinds (same physical meaning
+# regardless of kind) -- its default (460.0 kg/m^3) matches the
+# orthotropic/spruce placeholder, not a separate isotropic-specific one.
+assert approx(iso_dict["density"], 4.6e-10, tol=1e-13)
+assert iso_dict["e"] == 10000.0
+assert approx(iso_dict["nu"], 0.3)
+print("extract_material (both kinds) check passed")
+
+# --- Grain orientation -> *ORIENTATION vector resolution ---
+bpy.ops.mesh.primitive_cube_add()
+grain_obj = bpy.context.active_object
+grain_obj.soundboard_lab.grain_rotation = (0.0, 0.0, 0.0)
+identity_orientation = addon.analysis._compute_grain_orientation(grain_obj)
+assert all(abs(a - b) < 1e-9 for a, b in zip(identity_orientation, (1.0, 0.0, 0.0, 0.0, 1.0, 0.0))), (
+    identity_orientation
+)
+
+# A 90-degree Z rotation on the OBJECT ITSELF (not grain_rotation) must
+# carry through to the resolved world-space vectors -- world X -> world Y,
+# world Y -> world -X (right-hand rotation about Z).
+grain_obj.rotation_euler = (0.0, 0.0, math.radians(90))
+bpy.context.view_layer.update()
+rotated_orientation = addon.analysis._compute_grain_orientation(grain_obj)
+expected = (0.0, 1.0, 0.0, -1.0, 0.0, 0.0)
+assert all(abs(a - b) < 1e-6 for a, b in zip(rotated_orientation, expected)), (rotated_orientation, expected)
+print("_compute_grain_orientation check passed")
+
+# --- Global solution parameters: Scene-level, project-persisted ---
+assert bpy.context.scene.soundboard_lab_n_frequencies == 10
+assert bpy.context.scene.soundboard_lab_boundary_condition == 'FIXED_EDGE'
+assert bpy.context.scene.soundboard_lab_num_layers == 3
+bpy.context.scene.soundboard_lab_n_frequencies = 6
+assert bpy.context.scene.soundboard_lab_n_frequencies == 6
+print("Global solution parameters (Scene-level) check passed")
+
 # --- Analysis & Solve: real end-to-end subprocess pipeline ---
 # Unlike the gizmo, this needs no window manager -- it's just
 # subprocess launching -- so it can be fully exercised headlessly,

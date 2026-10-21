@@ -31,7 +31,14 @@ import sys
 import traceback
 from pathlib import Path
 
-from soundboard_lab.materials import SPRUCE_PLACEHOLDER, NonPhysicalMaterialError, validate_positive_definite
+from soundboard_lab.materials import (
+    SPRUCE_PLACEHOLDER,
+    Material,
+    NonPhysicalMaterialError,
+    material_from_dict,
+    validate_material,
+    validate_positive_definite,
+)
 from soundboard_lab.mesh import mesh_surface, write_frequency_inp_orthotropic
 from soundboard_lab.repair import MeshRepairError, repair_stl
 from soundboard_lab.shell_mesh import mode_shape_z_displacement, shell_from_closed_mesh, write_shell_frequency_inp
@@ -167,12 +174,19 @@ def run_shell_analysis(
     num_layers: int,
     fixed_edge: bool,
     status_json: Path | None = None,
+    material: Material = SPRUCE_PLACEHOLDER,
+    orientation: tuple[float, float, float, float, float, float] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
 ) -> None:
     """Shell/extrusion-mesh analysis path (`shell_mesh.py`) -- the
     thin/flat-aware alternative to `run_analysis`'s generic tet path,
-    for role=Soundboard objects. Material and grain orientation are
-    still hardcoded to `SPRUCE_PLACEHOLDER`/identity (same known gap
-    as the tet path; not addressed here -- tracked separately).
+    for role=Soundboard objects.
+
+    `material`/`orientation` default to `SPRUCE_PLACEHOLDER`/identity
+    (preserving every existing caller/test that doesn't pass them),
+    but the addon now resolves the object's actual assigned Material
+    ID-block + per-object grain rotation and passes them in via
+    `main()`'s `--material-json`/`--orientation` flags -- no longer
+    hardcoded end-to-end.
 
     Unlike `run_analysis`, also writes the solved shell's own footprint
     (`xy`/`triangles`) and every mode's per-node Z-displacement into
@@ -180,8 +194,7 @@ def run_shell_analysis(
     preview, which `run_analysis`'s tet path has no equivalent of.
     """
     tracker = StepTracker(status_json, SHELL_PIPELINE_STEPS)
-    material = SPRUCE_PLACEHOLDER
-    validate_positive_definite(material)
+    validate_material(material)
     work_dir = output_json.parent
 
     try:
@@ -206,7 +219,13 @@ def run_shell_analysis(
         tracker.start("write_input")
         inp_path = work_dir / "analysis.inp"
         write_result = write_shell_frequency_inp(
-            shell, material, num_layers=num_layers, inp_path=inp_path, n_frequencies=n_frequencies, fixed_edge=fixed_edge
+            shell,
+            material,
+            num_layers=num_layers,
+            inp_path=inp_path,
+            n_frequencies=n_frequencies,
+            fixed_edge=fixed_edge,
+            orientation=orientation,
         )
         tracker.done("write_input", f"{write_result.element_count} elements")
     except Exception as exc:
@@ -268,9 +287,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--boundary-condition", choices=["free_free", "fixed_edge"], default="free_free")
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--status-json", type=Path, default=None)
+    parser.add_argument(
+        "--material-json",
+        type=Path,
+        default=None,
+        help="Path to a JSON material descriptor (see materials.material_to_dict/_from_dict); defaults to SPRUCE_PLACEHOLDER",
+    )
+    parser.add_argument(
+        "--orientation",
+        type=str,
+        default=None,
+        help=(
+            "Six comma-separated floats 'a1,a2,a3,b1,b2,b3' for the *ORIENTATION card "
+            "(local-1 axis vector, then a vector in the local 1-2 plane); defaults to identity"
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
+        material = SPRUCE_PLACEHOLDER
+        if args.material_json is not None:
+            material = material_from_dict(json.loads(args.material_json.read_text()))
+        orientation = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+        if args.orientation is not None:
+            parts = [float(x) for x in args.orientation.split(",")]
+            if len(parts) != 6:
+                raise ValueError(f"--orientation must be 6 comma-separated floats, got {args.orientation!r}")
+            orientation = tuple(parts)
+
         if args.mesh_type == "shell":
             run_shell_analysis(
                 stl_path=args.stl,
@@ -281,6 +325,8 @@ def main(argv: list[str] | None = None) -> int:
                 num_layers=args.num_layers,
                 fixed_edge=(args.boundary_condition == "fixed_edge"),
                 status_json=args.status_json,
+                material=material,
+                orientation=orientation,
             )
         else:
             run_analysis(

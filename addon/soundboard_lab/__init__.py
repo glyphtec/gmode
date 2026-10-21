@@ -92,12 +92,29 @@ class SoundboardLabObjectSettings(bpy.types.PropertyGroup):
 
 
 class SoundboardLabMaterialSettings(bpy.types.PropertyGroup):
-    """Physical-material kind, attached to bpy.types.Material.
+    """Physical-material properties, attached to bpy.types.Material.
 
-    This is a stub: it currently carries only enough (`kind`) to gate
-    role-driven UI such as the grain-orientation rosette gizmo below.
-    Isotropic/orthotropic are distinct kinds (not one type with a switch,
-    see docs/CLAUDE.md); the full per-kind constant sets are a follow-up.
+    Isotropic/orthotropic are distinct kinds (not one type with a
+    switch, see docs/CLAUDE.md "Material library") -- each carries its
+    own field set below, gated in the UI by `kind`. `density` is
+    shared (same physical meaning regardless of kind).
+
+    Units: stiffness fields (E/G) are in MPa and density in kg/m^3 --
+    the UI's own choice for readability; the engine's own internal
+    convention (consistent mesh units, e.g. t/mm^3 for density to
+    match a mm-based model) is unaffected; `extract_material()` below
+    does the kg/m^3 -> t/mm^3 conversion (factor 1e-12) when building
+    the plain dict passed to the engine subprocess.
+
+    Defaults are prefilled with SPRUCE_PLACEHOLDER's own constants
+    (orthotropic fields) and a generic ISOTROPIC_PLACEHOLDER (isotropic-
+    only `iso_e`/`iso_nu` fields) -- editable starting points, not
+    meaningless zeros, per the same "for plumbing validation only,
+    replace with real lab data" caveat the engine's own placeholders
+    carry. `density` itself is a single shared field (one physical
+    quantity, not two), so it defaults to SPRUCE_PLACEHOLDER's own
+    460 kg/m^3 regardless of kind -- not a separate isotropic-specific
+    default; switching kind does not change it.
     """
 
     kind: bpy.props.EnumProperty(
@@ -109,6 +126,55 @@ class SoundboardLabMaterialSettings(bpy.types.PropertyGroup):
         ],
         default='ISOTROPIC',
     )
+    density: bpy.props.FloatProperty(
+        name="Density",
+        description="Mass density, kg/m^3",
+        default=460.0,  # SprucePlaceholder, 460 kg/m^3
+        min=0.0,
+        unit='NONE',
+    )
+    # Orthotropic fields (wood-science L/R/T convention, see
+    # src/soundboard_lab/materials.py -- same names, so extraction is
+    # a direct field-for-field copy, not a renaming exercise).
+    e_longitudinal: bpy.props.FloatProperty(name="E Longitudinal (grain)", description="MPa", default=13800.0, min=0.0)
+    e_radial: bpy.props.FloatProperty(name="E Radial", description="MPa", default=811.76, min=0.0)
+    e_tangential: bpy.props.FloatProperty(name="E Tangential", description="MPa", default=593.4, min=0.0)
+    g_lr: bpy.props.FloatProperty(name="G LR", description="MPa", default=828.0, min=0.0)
+    g_lt: bpy.props.FloatProperty(name="G LT", description="MPa", default=621.0, min=0.0)
+    g_rt: bpy.props.FloatProperty(name="G RT", description="MPa", default=41.4, min=0.0)
+    nu_lr: bpy.props.FloatProperty(name="Poisson LR", description="Stress in L, response in R", default=0.38)
+    nu_lt: bpy.props.FloatProperty(name="Poisson LT", description="Stress in L, response in T", default=0.40)
+    nu_rt: bpy.props.FloatProperty(name="Poisson RT", description="Stress in R, response in T", default=0.45)
+    # Isotropic fields.
+    iso_e: bpy.props.FloatProperty(name="E", description="MPa", default=10000.0, min=0.0)
+    iso_nu: bpy.props.FloatProperty(name="Poisson Ratio", description="Unitless", default=0.3)
+
+
+def extract_material(mat: bpy.types.Material) -> dict:
+    """Build the plain dict `materials.material_from_dict()` expects,
+    from a Material ID-block's `soundboard_lab` fields -- the one
+    place the kg/m^3 -> t/mm^3 unit conversion happens (see
+    `SoundboardLabMaterialSettings` docstring).
+    """
+    s = mat.soundboard_lab
+    density_t_mm3 = s.density * 1e-12
+    if s.kind == 'ORTHOTROPIC':
+        return {
+            "kind": "ORTHOTROPIC",
+            "name": mat.name,
+            "density": density_t_mm3,
+            "e_longitudinal": s.e_longitudinal,
+            "e_radial": s.e_radial,
+            "e_tangential": s.e_tangential,
+            "g_lr": s.g_lr,
+            "g_lt": s.g_lt,
+            "g_rt": s.g_rt,
+            "nu_lr": s.nu_lr,
+            "nu_lt": s.nu_lt,
+            "nu_rt": s.nu_rt,
+        }
+    else:
+        return {"kind": "ISOTROPIC", "name": mat.name, "density": density_t_mm3, "e": s.iso_e, "nu": s.iso_nu}
 
 
 def is_grain_orientable(obj):
@@ -352,11 +418,15 @@ class SOUNDBOARD_PT_bodies(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         obj = context.object
-        if obj is not None:
-            layout.prop(obj.soundboard_lab, "role")
-            layout.operator(SOUNDBOARD_OT_set_role_lining.bl_idname, icon='MOD_SOFT')
-        else:
+        if obj is None:
             layout.label(text="No active object")
+            return
+        layout.prop(obj.soundboard_lab, "role")
+        layout.operator(SOUNDBOARD_OT_set_role_lining.bl_idname, icon='MOD_SOFT')
+        layout.separator()
+        layout.template_ID(obj, "active_material", new="material.new")
+        if obj.active_material is not None:
+            _draw_material_fields(layout, obj.active_material)
 
 
 class SOUNDBOARD_PT_grain(bpy.types.Panel):
@@ -404,12 +474,52 @@ class SOUNDBOARD_PT_object_role(bpy.types.Panel):
             layout.label(text="No active object")
 
 
-class SOUNDBOARD_PT_material(bpy.types.Panel):
-    """Physical material kind, in the Properties editor's Material tab.
+def _draw_material_fields(layout, mat: bpy.types.Material) -> None:
+    """Shared by the N-panel's Bodies & Roles sub-panel and the
+    Properties editor's Material tab (see docs/CLAUDE.md "Material
+    library": the N-panel is the primary editing surface, the
+    Material tab an optional deeper mirror -- same fields, not two
+    different schemas to keep in sync by hand).
+    """
+    s = mat.soundboard_lab
+    layout.prop(s, "kind")
+    layout.prop(s, "density")
 
-    Full isotropic/orthotropic constant fields are a follow-up task (see
-    docs/CLAUDE.md); this currently exposes just the kind selector that
-    other UI (e.g. the grain-orientation rosette) gates on.
+    if s.kind == 'ORTHOTROPIC':
+        box = layout.box()
+        box.label(text="Stiffness (MPa) -- L=longitudinal/grain, R=radial, T=tangential")
+        box.prop(s, "e_longitudinal")
+        box.prop(s, "e_radial")
+        box.prop(s, "e_tangential")
+        box.prop(s, "g_lr")
+        box.prop(s, "g_lt")
+        box.prop(s, "g_rt")
+        box.prop(s, "nu_lr")
+        box.prop(s, "nu_lt")
+        box.prop(s, "nu_rt")
+        for name, value in (("E Longitudinal", s.e_longitudinal), ("E Radial", s.e_radial),
+                             ("E Tangential", s.e_tangential), ("G LR", s.g_lr), ("G LT", s.g_lt),
+                             ("G RT", s.g_rt)):
+            if value <= 0:
+                box.label(text=f"{name} must be positive", icon='ERROR')
+    else:
+        box = layout.box()
+        box.prop(s, "iso_e")
+        box.prop(s, "iso_nu")
+        if s.iso_e <= 0:
+            box.label(text="E must be positive", icon='ERROR')
+        if not (-1.0 < s.iso_nu < 0.5):
+            box.label(text="Poisson Ratio must be between -1 and 0.5", icon='ERROR')
+    layout.label(text="Full stiffness-tensor validation runs at solve time (see Results & Verification)")
+
+
+class SOUNDBOARD_PT_material(bpy.types.Panel):
+    """Physical material properties, in the Properties editor's
+    Material tab (see docs/CLAUDE.md "Material library": a Material
+    ID-block's slot *is* its physical material assignment -- link/
+    append across a materials_library.blend, Asset Browser cataloguing
+    etc. all come from this being a normal Material ID-block, not a
+    custom add-on-side list).
     """
 
     bl_label = "Soundboard Lab"
@@ -420,11 +530,10 @@ class SOUNDBOARD_PT_material(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         mat = context.material
-        if mat is not None:
-            layout.prop(mat.soundboard_lab, "kind")
-            layout.label(text="Physical constants: placeholder (follow-up task)")
-        else:
+        if mat is None:
             layout.label(text="No active material")
+            return
+        _draw_material_fields(layout, mat)
 
 
 class SOUNDBOARD_PT_bonds(bpy.types.Panel):
@@ -483,6 +592,13 @@ class SOUNDBOARD_PT_analysis(bpy.types.Panel):
             layout.prop(obj.soundboard_lab, "mesh_element_size")
         else:
             layout.label(text="Select a Soundboard-role object")
+
+        box = layout.box()
+        box.label(text="Global Solution Parameters")
+        box.prop(context.scene, "soundboard_lab_n_frequencies")
+        box.prop(context.scene, "soundboard_lab_boundary_condition")
+        box.prop(context.scene, "soundboard_lab_num_layers")
+
         layout.operator(analysis.SOUNDBOARD_OT_analyze.bl_idname, icon='PLAY', text="GO!")
         status = context.scene.soundboard_lab_status
         if status == 'RUNNING':

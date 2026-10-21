@@ -19,7 +19,13 @@ from pathlib import Path
 
 import numpy as np
 
-from soundboard_lab.materials import OrthotropicWoodMaterial, to_calculix_engineering_constants, validate_positive_definite
+from soundboard_lab.materials import (
+    IsotropicMaterial,
+    Material,
+    OrthotropicWoodMaterial,
+    to_calculix_engineering_constants,
+    validate_material,
+)
 from soundboard_lab.mesh import _frequency_step_cards
 
 
@@ -563,11 +569,12 @@ def mode_shape_z_displacement(
 
 def write_shell_frequency_inp(
     shell: ShellMesh,
-    material: OrthotropicWoodMaterial,
+    material: Material,
     num_layers: int,
     inp_path: Path,
     n_frequencies: int = 10,
     fixed_edge: bool = False,
+    orientation: tuple[float, float, float, float, float, float] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
 ) -> ShellInpWriteResult:
     """Write a `*FREQUENCY` CalculiX `.inp` from a multi-layer C3D15
     extrusion of `shell`. Returns a `ShellInpWriteResult`.
@@ -584,14 +591,26 @@ def write_shell_frequency_inp(
     loop is always smaller since the outer loop's region is a strict
     superset. Interior-hole nodes are deliberately left unconstrained.
 
-    Orientation is currently identity (same known gap as
-    write_frequency_inp_orthotropic in mesh.py -- grain rotation isn't
-    wired through yet, tracked separately as a fast-follow).
+    `material` may be either an `OrthotropicWoodMaterial` (writes
+    `*ELASTIC, TYPE=ENGINEERING CONSTANTS` plus an `*ORIENTATION`
+    card) or an `IsotropicMaterial` (writes `*ELASTIC, TYPE=ISO`;
+    stiffness is directionally invariant for an isotropic material, so
+    no `*ORIENTATION`/`ORIENTATION=` is emitted at all -- there's
+    nothing for it to affect).
+
+    `orientation` is the raw six numbers CalculiX's `*ORIENTATION`
+    card takes: a vector along the local 1-axis followed by a vector
+    in the local 1-2 plane (`a1,a2,a3,b1,b2,b3`). Identity (matching
+    the X=radial/Y=longitudinal/Z=tangential convention with no
+    rotation) by default; the addon resolves a per-object grain
+    rotation into this pair of vectors before calling in, since grain
+    orientation is an object-level property, independent of the
+    Material ID-block (see docs/CLAUDE.md "Material library"/"Grain
+    orientation"). Ignored for an isotropic material (see above).
     """
-    validate_positive_definite(material)
+    validate_material(material)
     prisms = extrude_shell_to_prisms(shell, num_layers)
     nodes, elements, corner_node_ids = prisms.nodes, prisms.elements, prisms.corner_node_ids
-    e1, e2, e3, nu12, nu13, nu23, g12, g13, g23 = to_calculix_engineering_constants(material)
 
     lines = [
         "** Soundboard Lab -- multi-layer C3D15 prism extrusion of a",
@@ -606,17 +625,31 @@ def write_shell_frequency_inp(
         node_ids = ", ".join(str(n) for n in conn)
         lines.append(f"{i}, {node_ids}")
 
-    lines += [
-        "*ORIENTATION, NAME=GrainAxes",
-        "1., 0., 0., 0., 1., 0.",
-        f"*MATERIAL, NAME={material.name}",
-        "*ELASTIC, TYPE=ENGINEERING CONSTANTS",
-        f"{e1:.10g}, {e2:.10g}, {e3:.10g}, {nu12:.10g}, {nu13:.10g}, {nu23:.10g}, {g12:.10g}, {g13:.10g},",
-        f"{g23:.10g}",
-        "*DENSITY",
-        f"{material.density:.10g}",
-        f"*SOLID SECTION, ELSET=Evolumes, MATERIAL={material.name}, ORIENTATION=GrainAxes",
-    ]
+    if isinstance(material, OrthotropicWoodMaterial):
+        e1, e2, e3, nu12, nu13, nu23, g12, g13, g23 = to_calculix_engineering_constants(material)
+        a1, a2, a3, b1, b2, b3 = orientation
+        lines += [
+            "*ORIENTATION, NAME=GrainAxes",
+            f"{a1:.10g}, {a2:.10g}, {a3:.10g}, {b1:.10g}, {b2:.10g}, {b3:.10g}",
+            f"*MATERIAL, NAME={material.name}",
+            "*ELASTIC, TYPE=ENGINEERING CONSTANTS",
+            f"{e1:.10g}, {e2:.10g}, {e3:.10g}, {nu12:.10g}, {nu13:.10g}, {nu23:.10g}, {g12:.10g}, {g13:.10g},",
+            f"{g23:.10g}",
+            "*DENSITY",
+            f"{material.density:.10g}",
+            f"*SOLID SECTION, ELSET=Evolumes, MATERIAL={material.name}, ORIENTATION=GrainAxes",
+        ]
+    elif isinstance(material, IsotropicMaterial):
+        lines += [
+            f"*MATERIAL, NAME={material.name}",
+            "*ELASTIC, TYPE=ISO",
+            f"{material.e:.10g}, {material.nu:.10g}",
+            "*DENSITY",
+            f"{material.density:.10g}",
+            f"*SOLID SECTION, ELSET=Evolumes, MATERIAL={material.name}",
+        ]
+    else:
+        raise TypeError(f"Unknown material type: {type(material)!r}")
 
     if fixed_edge:
         outer_loop, _hole_loops = classify_boundary_loops(shell.xy, shell.triangles)

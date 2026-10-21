@@ -20,6 +20,7 @@ import tempfile
 from pathlib import Path
 
 import bpy
+from mathutils import Vector
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +145,17 @@ def export_triangulated_stl(context, obj: bpy.types.Object, stl_path: Path) -> i
 # ---------------------------------------------------------------------------
 
 
-def start_solve(context, obj: bpy.types.Object, ccx_path: str, engine_python_path: str) -> dict:
+def start_solve(
+    context,
+    obj: bpy.types.Object,
+    ccx_path: str,
+    engine_python_path: str,
+    n_frequencies: int = 10,
+    boundary_condition: str = "fixed_edge",
+    num_layers: int = 3,
+    material: dict | None = None,
+    orientation: tuple[float, float, float, float, float, float] | None = None,
+) -> dict:
     """Export `obj` and launch the engine CLI subprocess. Returns a
     handle dict for `poll_solve`. Raises `FileNotFoundError` for
     problems that must stop before ever spawning a process.
@@ -156,6 +167,24 @@ def start_solve(context, obj: bpy.types.Object, ccx_path: str, engine_python_pat
     concept this otherwise-plain, independently-testable function
     shouldn't be coupled to. The operator resolves preferences and
     passes the paths in.
+
+    `n_frequencies`/`boundary_condition`/`num_layers` default to the
+    same values that used to be hardcoded here, so every existing
+    direct caller (tests, this function's own prior behavior) is
+    unaffected; the operator now reads the real values from the
+    Scene's global solution-parameter properties instead of relying
+    on these defaults.
+
+    `material`, if given, is a plain dict (see
+    `soundboard_lab.materials.material_to_dict`/`_from_dict` on the
+    engine side) written to a temp JSON file and passed via
+    `--material-json`; `None` leaves the engine's own
+    `SPRUCE_PLACEHOLDER` default in place (e.g. no Material assigned
+    to `obj` yet -- graceful degradation, not a hard error, since a
+    missing material shouldn't block a first solve attempt).
+    `orientation` is the six raw `*ORIENTATION` numbers (see
+    `_compute_grain_orientation`); `None` leaves the engine's identity
+    default in place.
     """
     if not ccx_path or not Path(ccx_path).is_file():
         raise FileNotFoundError("ccx executable path is not configured or does not exist (add-on preferences)")
@@ -184,14 +213,20 @@ def start_solve(context, obj: bpy.types.Object, ccx_path: str, engine_python_pat
         "--ccx-exe", ccx_path,
         "--output-json", str(output_json),
         "--element-size", str(settings.mesh_element_size),
-        "--n-frequencies", "10",
+        "--n-frequencies", str(n_frequencies),
         "--mesh-type", "shell",
-        "--boundary-condition", "fixed_edge",
-        "--num-layers", "3",
+        "--boundary-condition", boundary_condition,
+        "--num-layers", str(num_layers),
         "--status-json", str(status_json),
     ]
     if settings.mesh_thickness_hint > 0:
         cmd += ["--thickness-hint", str(settings.mesh_thickness_hint)]
+    if material is not None:
+        material_json_path = work_dir / "material.json"
+        material_json_path.write_text(json.dumps(material))
+        cmd += ["--material-json", str(material_json_path)]
+    if orientation is not None:
+        cmd += ["--orientation", ",".join(str(v) for v in orientation)]
 
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return {
@@ -562,12 +597,40 @@ def _on_selected_mode_index_update(self, context):
     _update_mode_shape_preview(self)
 
 
+def _compute_grain_orientation(obj: bpy.types.Object) -> tuple[float, float, float, float, float, float]:
+    """Resolve `obj.soundboard_lab.grain_rotation` (a per-object Euler,
+    relative to the object's own LOCAL axes -- see docs/CLAUDE.md
+    "Grain orientation") into the six raw `*ORIENTATION` numbers the
+    engine's CLI `--orientation` flag expects: a world-space vector
+    along the local 1-axis (radial), then a world-space vector in the
+    local 1-2 plane (longitudinal) -- see `write_shell_frequency_inp`'s
+    own docstring for the CalculiX card format.
+
+    Grain orientation is deliberately independent of the Material
+    ID-block (the same material gets reused across boards with
+    different grain directions), so this is resolved from the OBJECT,
+    not from `extract_material`.
+
+    World space, not object-local: the engine's own mesh coordinates
+    are already world-space (`export_triangulated_stl` bakes
+    `matrix_world` into the exported STL), so the orientation vectors
+    must be transformed the same way. Only the rotation component of
+    `matrix_world` is used (via `to_quaternion()`), not scale/shear --
+    an axis direction has no meaningful "scale".
+    """
+    grain_rotation_matrix = obj.soundboard_lab.grain_rotation.to_matrix()
+    world_rotation_matrix = obj.matrix_world.to_quaternion().to_matrix()
+    a = world_rotation_matrix @ (grain_rotation_matrix @ Vector((1.0, 0.0, 0.0)))
+    b = world_rotation_matrix @ (grain_rotation_matrix @ Vector((0.0, 1.0, 0.0)))
+    return (a.x, a.y, a.z, b.x, b.y, b.z)
+
+
 class SOUNDBOARD_OT_analyze(bpy.types.Operator):
     bl_idname = "soundboard.analyze"
     bl_label = "Analyze"
     bl_description = (
-        "Mesh (shell/extrusion) and solve the Soundboard-role object, fixed at its outer edge, "
-        "via the engine subprocess"
+        "Mesh (shell/extrusion) and solve the Soundboard-role object via the engine subprocess, "
+        "using the project's global solution parameters and the object's assigned material/grain orientation"
     )
     bl_options = {'REGISTER'}
 
@@ -578,10 +641,25 @@ class SOUNDBOARD_OT_analyze(bpy.types.Operator):
 
     def execute(self, context):
         global _active_handle
+        from . import extract_material  # lazy: avoids a circular import with __init__.py at module load time
+
         try:
             obj = find_soundboard_object(context)
             prefs = get_preferences(context)
-            _active_handle = start_solve(context, obj, prefs.ccx_path, prefs.engine_python_path)
+            material = extract_material(obj.active_material) if obj.active_material is not None else None
+            orientation = _compute_grain_orientation(obj)
+            scene = context.scene
+            _active_handle = start_solve(
+                context,
+                obj,
+                prefs.ccx_path,
+                prefs.engine_python_path,
+                n_frequencies=scene.soundboard_lab_n_frequencies,
+                boundary_condition=scene.soundboard_lab_boundary_condition.lower(),
+                num_layers=scene.soundboard_lab_num_layers,
+                material=material,
+                orientation=orientation,
+            )
         except (SoundboardLabSceneError, FileNotFoundError) as exc:
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
@@ -625,6 +703,26 @@ def register():
         default='IDLE',
     )
     bpy.types.Scene.soundboard_lab_message = bpy.props.StringProperty()
+    # Global solution parameters: project-level (Scene), not per-body,
+    # since they describe the analysis itself rather than any one
+    # object -- saved with the .blend file automatically like any
+    # other Scene property (no extra persistence code needed within a
+    # project; a reusable cross-project default would be a separate,
+    # bigger piece of work -- not built here).
+    bpy.types.Scene.soundboard_lab_n_frequencies = bpy.props.IntProperty(
+        name="Number of Modes", description="How many eigenfrequencies/mode shapes to extract", default=10, min=1
+    )
+    bpy.types.Scene.soundboard_lab_boundary_condition = bpy.props.EnumProperty(
+        name="Boundary Condition",
+        items=[
+            ('FIXED_EDGE', "Fixed Edge", "Every perimeter node clamped (instrument-mounted analogy)"),
+            ('FREE_FREE', "Free-Free", "No supports at all (bare-plate validation rig analogy)"),
+        ],
+        default='FIXED_EDGE',
+    )
+    bpy.types.Scene.soundboard_lab_num_layers = bpy.props.IntProperty(
+        name="Through-Thickness Layers", description="Element layers through the shell's thickness", default=3, min=2
+    )
 
 
 def unregister():
@@ -632,6 +730,9 @@ def unregister():
     _active_handle = None
     _last_mesh_shape = None
     _last_mode_shapes = None
+    del bpy.types.Scene.soundboard_lab_num_layers
+    del bpy.types.Scene.soundboard_lab_boundary_condition
+    del bpy.types.Scene.soundboard_lab_n_frequencies
     del bpy.types.Scene.soundboard_lab_message
     del bpy.types.Scene.soundboard_lab_status
     del bpy.types.Scene.soundboard_lab_selected_mode_index
