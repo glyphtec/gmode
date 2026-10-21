@@ -127,7 +127,7 @@ class SoundboardLabMaterialSettings(bpy.types.PropertyGroup):
         default='ISOTROPIC',
     )
     density: bpy.props.FloatProperty(
-        name="Density",
+        name="Density (kg/m^3)",
         description="Mass density, kg/m^3",
         default=460.0,  # SprucePlaceholder, 460 kg/m^3
         min=0.0,
@@ -136,17 +136,39 @@ class SoundboardLabMaterialSettings(bpy.types.PropertyGroup):
     # Orthotropic fields (wood-science L/R/T convention, see
     # src/soundboard_lab/materials.py -- same names, so extraction is
     # a direct field-for-field copy, not a renaming exercise).
-    e_longitudinal: bpy.props.FloatProperty(name="E Longitudinal (grain)", description="MPa", default=13800.0, min=0.0)
-    e_radial: bpy.props.FloatProperty(name="E Radial", description="MPa", default=811.76, min=0.0)
-    e_tangential: bpy.props.FloatProperty(name="E Tangential", description="MPa", default=593.4, min=0.0)
-    g_lr: bpy.props.FloatProperty(name="G LR", description="MPa", default=828.0, min=0.0)
-    g_lt: bpy.props.FloatProperty(name="G LT", description="MPa", default=621.0, min=0.0)
-    g_rt: bpy.props.FloatProperty(name="G RT", description="MPa", default=41.4, min=0.0)
-    nu_lr: bpy.props.FloatProperty(name="Poisson LR", description="Stress in L, response in R", default=0.38)
-    nu_lt: bpy.props.FloatProperty(name="Poisson LT", description="Stress in L, response in T", default=0.40)
-    nu_rt: bpy.props.FloatProperty(name="Poisson RT", description="Stress in R, response in T", default=0.45)
+    e_longitudinal: bpy.props.FloatProperty(
+        name="E Longitudinal/grain (MPa)", description="Young's modulus along the grain, MPa", default=13800.0, min=0.0
+    )
+    e_radial: bpy.props.FloatProperty(
+        name="E Radial (MPa)", description="Young's modulus across the grain (radial), MPa", default=811.76, min=0.0
+    )
+    e_tangential: bpy.props.FloatProperty(
+        name="E Tangential (MPa)", description="Young's modulus through-thickness (tangential), MPa",
+        default=593.4, min=0.0,
+    )
+    g_lr: bpy.props.FloatProperty(
+        name="Shear Modulus G_LR (MPa)", description="Shear modulus, longitudinal-radial plane, MPa",
+        default=828.0, min=0.0,
+    )
+    g_lt: bpy.props.FloatProperty(
+        name="Shear Modulus G_LT (MPa)", description="Shear modulus, longitudinal-tangential plane, MPa",
+        default=621.0, min=0.0,
+    )
+    g_rt: bpy.props.FloatProperty(
+        name="Shear Modulus G_RT (MPa)", description="Shear modulus, radial-tangential plane, MPa",
+        default=41.4, min=0.0,
+    )
+    nu_lr: bpy.props.FloatProperty(
+        name="Poisson Ratio nu_LR", description="Unitless. Stress in L, response in R", default=0.38
+    )
+    nu_lt: bpy.props.FloatProperty(
+        name="Poisson Ratio nu_LT", description="Unitless. Stress in L, response in T", default=0.40
+    )
+    nu_rt: bpy.props.FloatProperty(
+        name="Poisson Ratio nu_RT", description="Unitless. Stress in R, response in T", default=0.45
+    )
     # Isotropic fields.
-    iso_e: bpy.props.FloatProperty(name="E", description="MPa", default=10000.0, min=0.0)
+    iso_e: bpy.props.FloatProperty(name="E (MPa)", description="Young's modulus, MPa", default=10000.0, min=0.0)
     iso_nu: bpy.props.FloatProperty(name="Poisson Ratio", description="Unitless", default=0.3)
 
 
@@ -497,9 +519,9 @@ def _draw_material_fields(layout, mat: bpy.types.Material) -> None:
         box.prop(s, "nu_lr")
         box.prop(s, "nu_lt")
         box.prop(s, "nu_rt")
-        for name, value in (("E Longitudinal", s.e_longitudinal), ("E Radial", s.e_radial),
-                             ("E Tangential", s.e_tangential), ("G LR", s.g_lr), ("G LT", s.g_lt),
-                             ("G RT", s.g_rt)):
+        for name, value in (("E Longitudinal/grain", s.e_longitudinal), ("E Radial", s.e_radial),
+                             ("E Tangential", s.e_tangential), ("Shear Modulus G_LR", s.g_lr),
+                             ("Shear Modulus G_LT", s.g_lt), ("Shear Modulus G_RT", s.g_rt)):
             if value <= 0:
                 box.label(text=f"{name} must be positive", icon='ERROR')
     else:
