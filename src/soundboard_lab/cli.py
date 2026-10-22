@@ -37,7 +37,6 @@ from soundboard_lab.materials import (
     NonPhysicalMaterialError,
     material_from_dict,
     validate_material,
-    validate_positive_definite,
 )
 from soundboard_lab.mesh import mesh_surface, write_frequency_inp_orthotropic
 from soundboard_lab.repair import MeshRepairError, repair_stl
@@ -131,9 +130,10 @@ def run_analysis(
     element_size: float,
     n_frequencies: int,
     thickness_hint: float | None,
+    material: Material = SPRUCE_PLACEHOLDER,
+    orientation: tuple[float, float, float, float, float, float] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
 ) -> None:
-    material = SPRUCE_PLACEHOLDER
-    validate_positive_definite(material)
+    validate_material(material)
 
     if thickness_hint is not None:
         check_through_thickness_layers(element_size, thickness_hint)
@@ -146,7 +146,7 @@ def run_analysis(
     tetra_count = next(c.data.shape[0] for c in mesh.cells if c.type == "tetra10")
 
     inp_path = work_dir / "analysis.inp"
-    write_frequency_inp_orthotropic(mesh, material, inp_path, n_frequencies=n_frequencies)
+    write_frequency_inp_orthotropic(mesh, material, inp_path, n_frequencies=n_frequencies, orientation=orientation)
 
     run_ccx(inp_path, ccx_exe)
     modes = parse_eigenfrequencies(inp_path.with_suffix(".dat"))
@@ -336,6 +336,8 @@ def main(argv: list[str] | None = None) -> int:
                 element_size=args.element_size,
                 n_frequencies=args.n_frequencies,
                 thickness_hint=args.thickness_hint,
+                material=material,
+                orientation=orientation,
             )
         return 0
     except (NonPhysicalMaterialError, CcxError, MeshRepairError, ValueError, FileNotFoundError) as exc:

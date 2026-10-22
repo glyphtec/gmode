@@ -37,6 +37,51 @@ def test_cli_success(ccx_path, tmp_path):
     assert real_freqs == sorted(real_freqs)
 
 
+def test_cli_tet_path_custom_material_json_actually_used(ccx_path, tmp_path):
+    """Real bug, found during live multi-body bonding-exercise testing:
+    run_analysis() (the tet path, default --mesh-type) hardcoded
+    SPRUCE_PLACEHOLDER internally and never even accepted a material
+    parameter -- --material-json silently had no effect on this path
+    (confirmed empirically: a real isotropic CF-composite material
+    JSON was passed, but the result's material_name still came back
+    "SprucePlaceholder"). Verify the fix the same way as the shell
+    path's own equivalent test: a stiffer isotropic material must give
+    higher frequencies than the default orthotropic spruce material,
+    mode-for-mode, on the same real fixture.
+    """
+    stiff_isotropic = IsotropicMaterial(name="TestStiffIsotropic", density=1.3e-9, e=32850.0, nu=0.3)
+    material_json = tmp_path / "material.json"
+    material_json.write_text(json.dumps(material_to_dict(stiff_isotropic)))
+
+    def solve(material_json_path):
+        output_json = tmp_path / f"result_{material_json_path is not None}.json"
+        args = [
+            "--stl", str(DATA_DIR / "soundboard_plate.stl"),
+            "--ccx-exe", str(ccx_path),
+            "--output-json", str(output_json),
+            "--element-size", "15.0",
+            "--n-frequencies", "10",
+        ]
+        if material_json_path is not None:
+            args += ["--material-json", str(material_json_path)]
+        exit_code = main(args)
+        assert exit_code == 0
+        return json.loads(output_json.read_text())
+
+    default_result = solve(None)
+    assert default_result["material_name"] == "SprucePlaceholder"
+    custom_result = solve(material_json)
+    assert custom_result["status"] == "ok"
+    assert custom_result["material_name"] == "TestStiffIsotropic"
+
+    default_freqs = [m["frequency_hz"] for m in default_result["modes"][6:]]
+    custom_freqs = [m["frequency_hz"] for m in custom_result["modes"][6:]]
+    # A much stiffer isotropic material (E=32850 MPa vs spruce's
+    # ~800-13800 MPa range) must come back higher mode-for-mode, not
+    # the same -- proof the override was actually used, not ignored.
+    assert all(c > d for c, d in zip(custom_freqs, default_freqs)), (custom_freqs, default_freqs)
+
+
 def test_cli_rejects_insufficient_through_thickness_layers(ccx_path, tmp_path):
     """element_size=15mm against a 3mm-thick plate gives far fewer
     than the required layers -- this must fail loudly, before ever
