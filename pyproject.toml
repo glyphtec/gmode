@@ -7,7 +7,7 @@ name = "soundboard-lab"
 version = "0.0.1"
 description = "Engine for soundboard eigenmode FEA experiments (pure Python, no bpy)"
 requires-python = ">=3.11"
-dependencies = ["gmsh", "meshio", "numpy", "trimesh", "pymeshfix", "scipy", "networkx"]
+dependencies = ["gmsh", "meshio", "numpy", "trimesh", "pymeshfix", "scipy", "networkx", "rtree"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
