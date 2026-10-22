@@ -89,6 +89,18 @@ class SoundboardLabObjectSettings(bpy.types.PropertyGroup):
         default=0.0,
         min=0.0,
     )
+    mesh_num_layers: bpy.props.IntProperty(
+        name="Through-Thickness Layers",
+        description=(
+            "Element layers through this body's thickness (shell/extrusion "
+            "mesher only). Per-object, not a global solution parameter -- "
+            "each independently-meshed body (soundboard, ribs, bridge "
+            "plate, etc.) may need its own layer count for its own "
+            "thickness, once multi-body meshing is in play"
+        ),
+        default=3,
+        min=2,
+    )
 
 
 class SoundboardLabMaterialSettings(bpy.types.PropertyGroup):
@@ -618,13 +630,11 @@ class SOUNDBOARD_PT_analysis(bpy.types.Panel):
         obj = context.object
         if obj is not None and obj.soundboard_lab.role == 'SOUNDBOARD':
             layout.prop(obj.soundboard_lab, "mesh_element_size")
+            layout.prop(obj.soundboard_lab, "mesh_num_layers")
         else:
             layout.label(text="Select a Soundboard-role object")
 
-        box = layout.box()
-        box.label(text="Global Solution Parameters")
-        box.prop(context.scene, "soundboard_lab_n_frequencies")
-        box.prop(context.scene, "soundboard_lab_num_layers")
+        layout.prop(context.scene, "soundboard_lab_n_frequencies")
 
         layout.operator(analysis.SOUNDBOARD_OT_analyze.bl_idname, icon='PLAY', text="GO!")
         status = context.scene.soundboard_lab_status

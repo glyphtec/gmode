@@ -776,7 +776,7 @@ class SOUNDBOARD_OT_analyze(bpy.types.Operator):
                 prefs.engine_python_path,
                 n_frequencies=scene.soundboard_lab_n_frequencies,
                 boundary_condition=scene.soundboard_lab_boundary_condition.lower(),
-                num_layers=scene.soundboard_lab_num_layers,
+                num_layers=obj.soundboard_lab.mesh_num_layers,
                 material=material,
                 orientation=orientation,
             )
@@ -855,9 +855,6 @@ def register():
         ],
         default='FIXED_EDGE',
     )
-    bpy.types.Scene.soundboard_lab_num_layers = bpy.props.IntProperty(
-        name="Through-Thickness Layers", description="Element layers through the shell's thickness", default=3, min=2
-    )
 
 
 def unregister():
@@ -865,7 +862,6 @@ def unregister():
     _active_handle = None
     _last_mesh_shape = None
     _last_mode_shapes = None
-    del bpy.types.Scene.soundboard_lab_num_layers
     del bpy.types.Scene.soundboard_lab_boundary_condition
     del bpy.types.Scene.soundboard_lab_n_frequencies
     del bpy.types.Scene.soundboard_lab_message

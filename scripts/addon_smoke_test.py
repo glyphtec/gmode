@@ -201,11 +201,16 @@ assert all(abs(a - b) < 1e-6 for a, b in zip(rotated_orientation, expected)), (r
 print("_compute_grain_orientation check passed")
 
 # --- Global solution parameters: Scene-level, project-persisted ---
+# num_layers is deliberately NOT here any more -- moved to per-object
+# (mesh_num_layers, alongside mesh_element_size/mesh_thickness_hint)
+# since each independently-meshed body may need its own layer count
+# for its own thickness, once multi-body meshing is in play.
 assert bpy.context.scene.soundboard_lab_n_frequencies == 10
 assert bpy.context.scene.soundboard_lab_boundary_condition == 'FIXED_EDGE'
-assert bpy.context.scene.soundboard_lab_num_layers == 3
 bpy.context.scene.soundboard_lab_n_frequencies = 6
 assert bpy.context.scene.soundboard_lab_n_frequencies == 6
+assert "mesh_num_layers" in obj.soundboard_lab.bl_rna.properties
+assert obj.soundboard_lab.mesh_num_layers == 3  # default
 print("Global solution parameters (Scene-level) check passed")
 
 # --- 'Body/Lining' boundary condition: validated, not yet implemented ---
