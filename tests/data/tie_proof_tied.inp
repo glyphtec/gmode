@@ -1,0 +1,57 @@
+** Soundboard Lab -- *TIE mechanics proof, case 2: TIE'd independent bodies.
+**
+** Same geometry as tie_proof_continuous.inp, but the top hex has its
+** OWN independent node numbers (9-16, not sharing 5-8 with the bottom
+** hex) -- the interface is only geometrically coincident, not
+** topologically shared, exactly the situation a real multi-body
+** assembly (soundboard + independently-meshed rib/bridge-plate) will
+** be in. A *TIE card connects the two faces via MPCs per the real
+** CalculiX 2.22 manual semantics for tied contact (verified against
+** the manual before writing this, not assumed): POSITION TOLERANCE
+** sets the max orthogonal slave-node-to-master-face gap; ADJUST=NO
+** means don't snap slave nodes onto the master face (unnecessary here
+** since the two faces are already exactly coincident).
+**
+** Face numbering per the *SURFACE keyword's documented hexahedral
+** convention: Face 2 = nodes 5-8-7-6 (the local "top" face of a hex
+** whose corners are numbered 1-8 per the standard C3D8 convention);
+** Face 1 = nodes 1-2-3-4 (the local "bottom" face).
+*NODE, NSET=Nall
+1, 0, 0, 0
+2, 10, 0, 0
+3, 10, 10, 0
+4, 0, 10, 0
+5, 0, 0, 10
+6, 10, 0, 10
+7, 10, 10, 10
+8, 0, 10, 10
+9, 0, 0, 10
+10, 10, 0, 10
+11, 10, 10, 10
+12, 0, 10, 10
+13, 0, 0, 20
+14, 10, 0, 20
+15, 10, 10, 20
+16, 0, 10, 20
+*ELEMENT, TYPE=C3D8, ELSET=Evolumes
+1, 1, 2, 3, 4, 5, 6, 7, 8
+2, 9, 10, 11, 12, 13, 14, 15, 16
+*SURFACE, NAME=TopFaceOfBottomHex
+1, S2
+*SURFACE, NAME=BottomFaceOfTopHex
+2, S1
+*TIE, NAME=TestTie, POSITION TOLERANCE=0.01, ADJUST=NO
+BottomFaceOfTopHex, TopFaceOfBottomHex
+*MATERIAL, NAME=GenericSteel
+*ELASTIC
+200000, 0.3
+*DENSITY
+7.9E-09
+*SOLID SECTION, ELSET=Evolumes, MATERIAL=GenericSteel
+*STEP
+*FREQUENCY
+16
+*NODE FILE
+U
+*OUTPUT, FREQUENCY=1
+*END STEP

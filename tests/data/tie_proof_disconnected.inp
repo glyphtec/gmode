@@ -1,0 +1,40 @@
+** Soundboard Lab -- *TIE mechanics proof, case 3: NEGATIVE CONTROL.
+**
+** Same two independently-numbered hexes as tie_proof_tied.inp, but
+** with NO *TIE at all -- completely mechanically disconnected.
+** Expect ~12 near-zero-frequency modes (6 rigid-body modes PER
+** independent body), not 6, contrasting clearly with the tied case to
+** confirm the tie is doing real mechanical work, not a no-op.
+*NODE, NSET=Nall
+1, 0, 0, 0
+2, 10, 0, 0
+3, 10, 10, 0
+4, 0, 10, 0
+5, 0, 0, 10
+6, 10, 0, 10
+7, 10, 10, 10
+8, 0, 10, 10
+9, 0, 0, 10
+10, 10, 0, 10
+11, 10, 10, 10
+12, 0, 10, 10
+13, 0, 0, 20
+14, 10, 0, 20
+15, 10, 10, 20
+16, 0, 10, 20
+*ELEMENT, TYPE=C3D8, ELSET=Evolumes
+1, 1, 2, 3, 4, 5, 6, 7, 8
+2, 9, 10, 11, 12, 13, 14, 15, 16
+*MATERIAL, NAME=GenericSteel
+*ELASTIC
+200000, 0.3
+*DENSITY
+7.9E-09
+*SOLID SECTION, ELSET=Evolumes, MATERIAL=GenericSteel
+*STEP
+*FREQUENCY
+16
+*NODE FILE
+U
+*OUTPUT, FREQUENCY=1
+*END STEP

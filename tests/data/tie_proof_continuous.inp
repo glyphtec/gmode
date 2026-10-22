@@ -1,0 +1,38 @@
+** Soundboard Lab -- *TIE mechanics proof, case 1: CONTINUOUS reference.
+**
+** Two stacked C3D8 hexes (10x10x10mm each, z=[0,10] and z=[10,20]),
+** sharing the 4 interface nodes directly (12 unique nodes total,
+** standard Abaqus/CalculiX C3D8 node order -- see stage1_single_hex.inp)
+** -- the "ground truth" a correctly-working *TIE case (see
+** tie_proof_tied.inp) should closely reproduce. Same material/units/
+** free-free setup as the project's own validated
+** tests/data/stage1_single_hex.inp, extended to two elements.
+*NODE, NSET=Nall
+1, 0, 0, 0
+2, 10, 0, 0
+3, 10, 10, 0
+4, 0, 10, 0
+5, 0, 0, 10
+6, 10, 0, 10
+7, 10, 10, 10
+8, 0, 10, 10
+9, 0, 0, 20
+10, 10, 0, 20
+11, 10, 10, 20
+12, 0, 10, 20
+*ELEMENT, TYPE=C3D8, ELSET=Evolumes
+1, 1, 2, 3, 4, 5, 6, 7, 8
+2, 5, 6, 7, 8, 9, 10, 11, 12
+*MATERIAL, NAME=GenericSteel
+*ELASTIC
+200000, 0.3
+*DENSITY
+7.9E-09
+*SOLID SECTION, ELSET=Evolumes, MATERIAL=GenericSteel
+*STEP
+*FREQUENCY
+16
+*NODE FILE
+U
+*OUTPUT, FREQUENCY=1
+*END STEP
