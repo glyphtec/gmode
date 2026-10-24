@@ -567,6 +567,44 @@ def mode_shape_z_displacement(
     return np.array([mode_displacements[int(node_id)][2] for node_id in top_layer_node_ids])
 
 
+def material_section_cards(
+    material: Material,
+    orientation: tuple[float, float, float, float, float, float],
+    elset: str,
+    material_name: str | None = None,
+    orientation_name: str = "GrainAxes",
+) -> list[str]:
+    """`*MATERIAL` + `*SOLID SECTION` (plus `*ORIENTATION` for an
+    orthotropic material) cards for one element set. `material_name`
+    overrides the card name -- multi-body inputs need one unique
+    material/orientation per body even when bodies share a material."""
+    name = material_name if material_name is not None else material.name
+    if isinstance(material, OrthotropicWoodMaterial):
+        e1, e2, e3, nu12, nu13, nu23, g12, g13, g23 = to_calculix_engineering_constants(material)
+        a1, a2, a3, b1, b2, b3 = orientation
+        return [
+            f"*ORIENTATION, NAME={orientation_name}",
+            f"{a1:.10g}, {a2:.10g}, {a3:.10g}, {b1:.10g}, {b2:.10g}, {b3:.10g}",
+            f"*MATERIAL, NAME={name}",
+            "*ELASTIC, TYPE=ENGINEERING CONSTANTS",
+            f"{e1:.10g}, {e2:.10g}, {e3:.10g}, {nu12:.10g}, {nu13:.10g}, {nu23:.10g}, {g12:.10g}, {g13:.10g},",
+            f"{g23:.10g}",
+            "*DENSITY",
+            f"{material.density:.10g}",
+            f"*SOLID SECTION, ELSET={elset}, MATERIAL={name}, ORIENTATION={orientation_name}",
+        ]
+    if isinstance(material, IsotropicMaterial):
+        return [
+            f"*MATERIAL, NAME={name}",
+            "*ELASTIC, TYPE=ISO",
+            f"{material.e:.10g}, {material.nu:.10g}",
+            "*DENSITY",
+            f"{material.density:.10g}",
+            f"*SOLID SECTION, ELSET={elset}, MATERIAL={name}",
+        ]
+    raise TypeError(f"Unknown material type: {type(material)!r}")
+
+
 def write_shell_frequency_inp(
     shell: ShellMesh,
     material: Material,
@@ -625,31 +663,7 @@ def write_shell_frequency_inp(
         node_ids = ", ".join(str(n) for n in conn)
         lines.append(f"{i}, {node_ids}")
 
-    if isinstance(material, OrthotropicWoodMaterial):
-        e1, e2, e3, nu12, nu13, nu23, g12, g13, g23 = to_calculix_engineering_constants(material)
-        a1, a2, a3, b1, b2, b3 = orientation
-        lines += [
-            "*ORIENTATION, NAME=GrainAxes",
-            f"{a1:.10g}, {a2:.10g}, {a3:.10g}, {b1:.10g}, {b2:.10g}, {b3:.10g}",
-            f"*MATERIAL, NAME={material.name}",
-            "*ELASTIC, TYPE=ENGINEERING CONSTANTS",
-            f"{e1:.10g}, {e2:.10g}, {e3:.10g}, {nu12:.10g}, {nu13:.10g}, {nu23:.10g}, {g12:.10g}, {g13:.10g},",
-            f"{g23:.10g}",
-            "*DENSITY",
-            f"{material.density:.10g}",
-            f"*SOLID SECTION, ELSET=Evolumes, MATERIAL={material.name}, ORIENTATION=GrainAxes",
-        ]
-    elif isinstance(material, IsotropicMaterial):
-        lines += [
-            f"*MATERIAL, NAME={material.name}",
-            "*ELASTIC, TYPE=ISO",
-            f"{material.e:.10g}, {material.nu:.10g}",
-            "*DENSITY",
-            f"{material.density:.10g}",
-            f"*SOLID SECTION, ELSET=Evolumes, MATERIAL={material.name}",
-        ]
-    else:
-        raise TypeError(f"Unknown material type: {type(material)!r}")
+    lines += material_section_cards(material, orientation, elset="Evolumes")
 
     if fixed_edge:
         outer_loop, _hole_loops = classify_boundary_loops(shell.xy, shell.triangles)

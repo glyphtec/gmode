@@ -8,8 +8,8 @@ Python running this module rather than importing the engine in-process).
 Usage:
     python -m soundboard_lab.cli --stl PATH --ccx-exe PATH --output-json PATH
         [--element-size FLOAT] [--n-frequencies INT] [--thickness-hint FLOAT]
-        [--mesh-type tet|shell] [--boundary-condition free_free|fixed_edge]
-        [--num-layers INT] [--status-json PATH]
+        [--mesh-type tet|shell] [--boundary-condition free_free|fixed_edge|body_lining]
+        [--num-layers INT] [--status-json PATH] [--bodies-json PATH] [--attachments-json PATH]
 
 Writes a JSON result (or error) to --output-json; the addon polls for
 that file's existence rather than parsing subprocess stdout, so the
@@ -31,6 +31,13 @@ import sys
 import traceback
 from pathlib import Path
 
+from soundboard_lab.assembly import (
+    IDENTITY_ORIENTATION,
+    AssemblyBody,
+    PointAttachment,
+    Terminal,
+    write_assembly_frequency_inp,
+)
 from soundboard_lab.materials import (
     SPRUCE_PLACEHOLDER,
     Material,
@@ -176,10 +183,24 @@ def run_shell_analysis(
     status_json: Path | None = None,
     material: Material = SPRUCE_PLACEHOLDER,
     orientation: tuple[float, float, float, float, float, float] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+    bonded_bodies: dict | None = None,
+    attachments: list[PointAttachment] | None = None,
 ) -> None:
     """Shell/extrusion-mesh analysis path (`shell_mesh.py`) -- the
     thin/flat-aware alternative to `run_analysis`'s generic tet path,
     for role=Soundboard objects.
+
+    `bonded_bodies`, if given, is `{"tolerance": float, "bodies": [{"name",
+    "stl", "element_size", "material" (dict or null), "orientation"
+    (6 floats or null), "terminal" (optional {"condition":
+    fixed|free|spring, "stiffness"})}]}`: each body is repaired, tet-meshed
+    and tied to the Soundboard (`assembly.write_assembly_frequency_inp`);
+    a body with a terminal is the rim lining (`assembly.Terminal`). None
+    or an empty list is the plain single-body solve.
+
+    `attachments` (`assembly.PointAttachment`: grounded Z springs and
+    lumped masses) also route through the assembly writer; the result
+    lists where each landed under `point_attachments`.
 
     `material`/`orientation` default to `SPRUCE_PLACEHOLDER`/identity
     (preserving every existing caller/test that doesn't pass them),
@@ -210,7 +231,11 @@ def run_shell_analysis(
     try:
         tracker.start("mesh")
         shell = shell_from_closed_mesh(repaired_stl, element_size=element_size)
-        tracker.done("mesh", f"{len(shell.triangles)} triangles")
+        assembly_bodies = _mesh_bonded_bodies(bonded_bodies, work_dir)
+        summary = f"{len(shell.triangles)} triangles"
+        if assembly_bodies:
+            summary += f" + {len(assembly_bodies)} bonded bodies"
+        tracker.done("mesh", summary)
     except Exception as exc:
         tracker.fail("mesh", str(exc))
         raise
@@ -218,16 +243,36 @@ def run_shell_analysis(
     try:
         tracker.start("write_input")
         inp_path = work_dir / "analysis.inp"
-        write_result = write_shell_frequency_inp(
-            shell,
-            material,
-            num_layers=num_layers,
-            inp_path=inp_path,
-            n_frequencies=n_frequencies,
-            fixed_edge=fixed_edge,
-            orientation=orientation,
-        )
-        tracker.done("write_input", f"{write_result.element_count} elements")
+        if assembly_bodies or attachments:
+            write_result = write_assembly_frequency_inp(
+                shell,
+                material,
+                num_layers=num_layers,
+                bodies=assembly_bodies,
+                tie_tolerance=float((bonded_bodies or {}).get("tolerance", 0.1)),
+                inp_path=inp_path,
+                n_frequencies=n_frequencies,
+                fixed_edge=fixed_edge,
+                soundboard_orientation=orientation,
+                attachments=attachments,
+            )
+        else:
+            write_result = write_shell_frequency_inp(
+                shell,
+                material,
+                num_layers=num_layers,
+                inp_path=inp_path,
+                n_frequencies=n_frequencies,
+                fixed_edge=fixed_edge,
+                orientation=orientation,
+            )
+        message = f"{write_result.element_count} elements"
+        tie_counts = getattr(write_result, "tie_node_counts", {})
+        if tie_counts:
+            message += f", {len(tie_counts)} ties"
+        if attachments:
+            message += f", {len(attachments)} point attachments"
+        tracker.done("write_input", message)
     except Exception as exc:
         tracker.fail("write_input", str(exc))
         raise
@@ -271,8 +316,68 @@ def run_shell_analysis(
             "triangles": shell.triangles.tolist(),
         },
         "mode_shapes": mode_shapes,
+        "bonded_bodies": [
+            {
+                "name": name,
+                "tie_nodes": count,
+                **(
+                    {"terminal_nodes": write_result.terminal_node_counts[name]}
+                    if name in getattr(write_result, "terminal_node_counts", {})
+                    else {}
+                ),
+            }
+            for name, count in getattr(write_result, "tie_node_counts", {}).items()
+        ],
+        "point_attachments": [
+            {"name": p.name, "body": p.body, "nodes": p.node_count, "snap_distance": p.snap_distance}
+            for p in getattr(write_result, "attachments", [])
+        ],
     }
     output_json.write_text(json.dumps(result))
+
+
+def _mesh_bonded_bodies(bonded_bodies: dict | None, work_dir: Path) -> list[AssemblyBody]:
+    if not bonded_bodies or not bonded_bodies.get("bodies"):
+        return []
+    meshed = []
+    for index, body in enumerate(bonded_bodies["bodies"]):
+        name = body["name"]
+        try:
+            repaired = work_dir / f"body_{index}_repaired.stl"
+            repair_stl(Path(body["stl"]), repaired)
+            mesh = mesh_surface(repaired, element_size=float(body["element_size"]))
+        except Exception as exc:
+            hint = ""
+            if "overlapping facets" in str(exc):
+                hint = " -- its surface intersects itself (e.g. an unmerged mirror seam; try Merge by Distance)"
+            raise ValueError(f"bonded body {name!r}: {type(exc).__name__}: {exc}{hint}") from exc
+        body_material = material_from_dict(body["material"]) if body.get("material") else SPRUCE_PLACEHOLDER
+        body_orientation = tuple(body["orientation"]) if body.get("orientation") else IDENTITY_ORIENTATION
+        terminal = None
+        if body.get("terminal"):
+            terminal = Terminal(str(body["terminal"]["condition"]), float(body["terminal"].get("stiffness", 0.0)))
+        meshed.append(AssemblyBody(name, mesh, body_material, body_orientation, terminal))
+    return meshed
+
+
+def load_attachments(spec: dict) -> list[PointAttachment]:
+    """`{"attachments": [{name, position: [x,y,z] mm, radius mm,
+    stiffness N/mm (Z, total), mass_g}]}` -> `PointAttachment`s."""
+    attachments = []
+    for item in spec.get("attachments", []):
+        position = tuple(float(v) for v in item["position"])
+        if len(position) != 3:
+            raise ValueError(f"attachment {item.get('name')!r}: position needs 3 coordinates")
+        attachments.append(
+            PointAttachment(
+                name=str(item["name"]),
+                position=position,
+                radius=float(item.get("radius", 5.0)),
+                stiffness=float(item.get("stiffness", 0.0)),
+                mass_g=float(item.get("mass_g", 0.0)),
+            )
+        )
+    return attachments
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -284,9 +389,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--n-frequencies", type=int, default=10)
     parser.add_argument("--thickness-hint", type=float, default=None)
     parser.add_argument("--mesh-type", choices=["tet", "shell"], default="tet")
-    parser.add_argument("--boundary-condition", choices=["free_free", "fixed_edge"], default="free_free")
+    parser.add_argument(
+        "--boundary-condition",
+        choices=["free_free", "fixed_edge", "body_lining"],
+        default="free_free",
+        help="body_lining: board edge left free; the rim is held by the lining body's own terminal",
+    )
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--status-json", type=Path, default=None)
+    parser.add_argument(
+        "--bodies-json",
+        type=Path,
+        default=None,
+        help=(
+            "Shell path only: JSON {tolerance, bodies:[{name, stl, element_size, material, orientation}]} "
+            "of bodies to tie to the Soundboard"
+        ),
+    )
+    parser.add_argument(
+        "--attachments-json",
+        type=Path,
+        default=None,
+        help=(
+            "Shell path only: JSON {attachments:[{name, position:[x,y,z], radius, stiffness (N/mm, Z), mass_g}]} "
+            "of grounded springs / point masses on the nearest body surface"
+        ),
+    )
     parser.add_argument(
         "--material-json",
         type=Path,
@@ -314,6 +442,22 @@ def main(argv: list[str] | None = None) -> int:
             if len(parts) != 6:
                 raise ValueError(f"--orientation must be 6 comma-separated floats, got {args.orientation!r}")
             orientation = tuple(parts)
+        bonded_bodies = None
+        if args.bodies_json is not None:
+            if args.mesh_type != "shell":
+                raise ValueError("--bodies-json requires --mesh-type shell")
+            bonded_bodies = json.loads(args.bodies_json.read_text())
+        attachments = None
+        if args.attachments_json is not None:
+            if args.mesh_type != "shell":
+                raise ValueError("--attachments-json requires --mesh-type shell")
+            attachments = load_attachments(json.loads(args.attachments_json.read_text()))
+        if args.boundary_condition == "body_lining":
+            bodies = (bonded_bodies or {}).get("bodies", [])
+            if args.mesh_type != "shell" or not any(b.get("terminal") for b in bodies):
+                raise ValueError(
+                    "--boundary-condition body_lining needs --mesh-type shell and a --bodies-json body with a terminal"
+                )
 
         if args.mesh_type == "shell":
             run_shell_analysis(
@@ -327,6 +471,8 @@ def main(argv: list[str] | None = None) -> int:
                 status_json=args.status_json,
                 material=material,
                 orientation=orientation,
+                bonded_bodies=bonded_bodies,
+                attachments=attachments,
             )
         else:
             run_analysis(

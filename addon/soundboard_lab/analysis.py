@@ -147,11 +147,54 @@ class SoundboardLabSceneError(RuntimeError):
     """
 
 
-def find_soundboard_object(context) -> bpy.types.Object:
-    candidates = [
+def find_role_objects(context, role: str) -> list[bpy.types.Object]:
+    """Authored mesh objects with `role`. Add-on-generated objects
+    (proxies, result displays) are never assembly inputs, even if a
+    user assigns them a role."""
+    return [
         obj for obj in context.scene.objects
-        if obj.type == 'MESH' and obj.soundboard_lab.role == 'SOUNDBOARD'
+        if obj.type == 'MESH'
+        and obj.soundboard_lab.role == role
+        and obj.soundboard_lab.generated_kind == 'NONE'
     ]
+
+
+KGF_TO_N = 9.80665
+ATTACHMENT_ROLES = ('POINT_ATTACHMENT', 'MASS_LOAD')
+
+
+def find_attachment_objects(context) -> list[bpy.types.Object]:
+    """Point Attachment / Mass Load objects of any type (typically
+    Empties); they act at their world-space origin."""
+    return [
+        obj for obj in context.scene.objects
+        if obj.soundboard_lab.role in ATTACHMENT_ROLES
+        and obj.soundboard_lab.generated_kind == 'NONE'
+    ]
+
+
+def gather_point_attachments(context) -> list[dict]:
+    """Engine `--attachments-json` entries (N/mm, grams, mm). Raises
+    `SoundboardLabSceneError` for an attachment that would do nothing."""
+    entries = []
+    for obj in find_attachment_objects(context):
+        settings = obj.soundboard_lab
+        stiffness = settings.attach_stiffness * KGF_TO_N if settings.role == 'POINT_ATTACHMENT' else 0.0
+        if stiffness <= 0 and settings.attach_mass_g <= 0:
+            needs = "a Spring Stiffness or Mass" if settings.role == 'POINT_ATTACHMENT' else "a Mass"
+            raise SoundboardLabSceneError(f"'{obj.name}' needs {needs} above 0")
+        entries.append({
+            "name": obj.name,
+            "position": list(obj.matrix_world.translation),
+            "radius": settings.attach_radius,
+            "stiffness": stiffness,
+            "mass_g": settings.attach_mass_g,
+        })
+    return entries
+
+
+def find_soundboard_object(context) -> bpy.types.Object:
+    candidates = find_role_objects(context, 'SOUNDBOARD')
     if not candidates:
         raise SoundboardLabSceneError("No object with role 'Soundboard' found in the scene")
     if len(candidates) > 1:
@@ -170,10 +213,7 @@ def find_lining_object(context) -> bpy.types.Object | None:
     an expected, reportable state (not a hard scene-integrity error
     the way a missing Soundboard is).
     """
-    candidates = [
-        obj for obj in context.scene.objects
-        if obj.type == 'MESH' and obj.soundboard_lab.role == 'LINING'
-    ]
+    candidates = find_role_objects(context, 'LINING')
     if len(candidates) > 1:
         names = ", ".join(o.name for o in candidates)
         raise SoundboardLabSceneError(
@@ -184,16 +224,13 @@ def find_lining_object(context) -> bpy.types.Object | None:
 
 def check_body_lining_boundary_condition(context) -> None:
     """Raises `SoundboardLabSceneError` if the scene's Boundary
-    Condition is set to 'Body/Lining' but it can't actually be used
-    yet -- either no Body/Lining-role object exists, or (always, for
-    now) because the bonding system it depends on isn't built yet.
+    Condition is set to 'Body/Lining' but no (or more than one)
+    Body/Lining-role object exists. Whether the lining is actually
+    bonded is checked at solve time by `bonds.gather_bonded_bodies`.
 
     Deliberately plain/testable, independent of `get_preferences()` --
     same rationale as `start_solve` taking explicit paths instead of
-    resolving preferences itself (see its own docstring): a headless
-    smoke test can exercise this directly, without needing Blender's
-    formal addon-enable mechanism just to check a scene-state
-    validation that has nothing to do with preferences.
+    resolving preferences itself (see its own docstring).
     """
     if context.scene.soundboard_lab_boundary_condition != 'BODY_LINING':
         return
@@ -202,10 +239,6 @@ def check_body_lining_boundary_condition(context) -> None:
             "Boundary Condition is set to 'Body/Lining' but no Body/Lining-role "
             "object was found in the scene"
         )
-    raise SoundboardLabSceneError(
-        "'Body/Lining' boundary condition is not yet implemented (needs the "
-        "bonding system, in progress) -- choose Fixed Edge or Free for now"
-    )
 
 
 def export_triangulated_stl(context, obj: bpy.types.Object, stl_path: Path) -> int:
@@ -274,6 +307,9 @@ def start_solve(
     num_layers: int = 3,
     material: dict | None = None,
     orientation: tuple[float, float, float, float, float, float] | None = None,
+    bonded_bodies: list[dict] | None = None,
+    tie_tolerance: float = 0.1,
+    attachments: list[dict] | None = None,
 ) -> dict:
     """Export `obj` and launch the engine CLI subprocess. Returns a
     handle dict for `poll_solve`. Raises `FileNotFoundError` for
@@ -304,6 +340,15 @@ def start_solve(
     `orientation` is the six raw `*ORIENTATION` numbers (see
     `_compute_grain_orientation`); `None` leaves the engine's identity
     default in place.
+
+    `bonded_bodies`, if given, is a list of `{"object", "material",
+    "orientation", "terminal"}` dicts: each object is exported and tied
+    to the Soundboard in the solve (`--bodies-json`) using its own
+    `mesh_element_size` and `tie_tolerance`; `terminal` (see
+    `bonds.terminal_spec`) is set only for the Body/Lining body.
+
+    `attachments` (see `gather_point_attachments`) become grounded Z
+    springs / lumped masses via `--attachments-json`.
     """
     if not ccx_path or not Path(ccx_path).is_file():
         raise FileNotFoundError("ccx executable path is not configured or does not exist (add-on preferences)")
@@ -346,8 +391,29 @@ def start_solve(
         cmd += ["--material-json", str(material_json_path)]
     if orientation is not None:
         cmd += ["--orientation", ",".join(str(v) for v in orientation)]
+    if bonded_bodies:
+        entries = []
+        for index, body in enumerate(bonded_bodies):
+            body_obj = body["object"]
+            body_stl = work_dir / f"body_{index}.stl"
+            export_triangulated_stl(context, body_obj, body_stl)
+            entries.append({
+                "name": body_obj.name,
+                "stl": str(body_stl),
+                "element_size": body_obj.soundboard_lab.mesh_element_size,
+                "material": body.get("material"),
+                "orientation": list(body["orientation"]) if body.get("orientation") is not None else None,
+                "terminal": body.get("terminal"),
+            })
+        bodies_json_path = work_dir / "bodies.json"
+        bodies_json_path.write_text(json.dumps({"tolerance": tie_tolerance, "bodies": entries}, indent=2))
+        cmd += ["--bodies-json", str(bodies_json_path)]
+    if attachments:
+        attachments_json_path = work_dir / "attachments.json"
+        attachments_json_path.write_text(json.dumps({"attachments": attachments}, indent=2))
+        cmd += ["--attachments-json", str(attachments_json_path)]
 
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process =  subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return {
         "process": process,
         "output_json": output_json,
@@ -464,12 +530,11 @@ def _set_viewport_vertex_color_shading():
 def _set_soundboard_visibility(obj: bpy.types.Object, visible: bool) -> None:
     """Show/hide the real Soundboard-role object in the viewport.
 
-    `surface_offset` alone (see `build_mode_shape_preview`) only pushes
-    the Z-fighting threshold out to a larger camera distance -- it
-    can't eliminate it, since depth-buffer precision degrades with
-    distance from the camera. Confirmed visually in a real GUI session:
-    clean up close, the same clashing/striping reappears once zoomed
-    out further. The robust fix is to not have two coincident solid
+    The mode-shape preview sits exactly on the solved top surface (no
+    display offset -- an earlier 0.5 offset only pushed the Z-fighting
+    threshold out to a larger camera distance anyway, since depth-buffer
+    precision degrades with distance; confirmed in a real GUI session).
+    The robust fix is to not have two coincident solid
     surfaces on screen at the same time at all: hide the real object
     while its mode-shape preview is showing, and restore it as soon as
     a new solve is kicked off (whether or not that solve succeeds --
@@ -493,11 +558,11 @@ def build_mode_shape_preview(
     top_z: list,
     triangles: list,
     z_displacement: list,
-    surface_offset: float = 0.5,
+    source: bpy.types.Object | None = None,
 ) -> bpy.types.Object:
-    """Build (or replace, if an object of this `name` already exists)
-    a real 3D mesh object -- vertices at
-    `(xy[i][0], xy[i][1], top_z[i] + surface_offset)` in WORLD space
+    """Build (or replace the existing one) the add-on-owned mode-shape
+    display object in the "Analysis Results" generated collection --
+    vertices at `(xy[i][0], xy[i][1], top_z[i])` in WORLD space
     (matching `export_triangulated_stl`'s world-space convention; this
     object's own transform is left at identity so the mesh data's own
     coordinates are used directly, not double-transformed) -- with a
@@ -508,24 +573,30 @@ def build_mode_shape_preview(
     exaggerated deformed shape was explicitly NOT wanted -- a static
     heat map on the real geometry is "table stakes" and sufficient).
 
-    `surface_offset` nudges the preview mesh slightly above the
-    original soundboard object's own top surface (both occupy the
-    EXACT same world-space Z otherwise, since `top_z` comes directly
-    from the solved shell's real top surface): without it, the two
-    coplanar surfaces Z-fight in the viewport (confirmed in a real
-    GUI session, not hypothetical -- the original object's solid-fill
-    shading and the preview's vertex-color shading flicker against
-    each other). 0.5 is small enough to look "on the surface" at any
-    reasonable zoom for a soundboard-scale object (~2mm thick), while
-    clearly separating the two surfaces in depth.
+    No display offset: the preview sits exactly on the solved top
+    surface (generated objects never displace from true geometry --
+    docs/CLAUDE.md "Generated collections & bonding proxies"). The
+    coplanar Z-fighting with the authored Soundboard is handled by
+    hiding that object while the preview shows (see
+    `_set_soundboard_visibility`) and by collection visibility toggles.
+
+    The object is found by its generated-kind tag, not by name, and
+    tagged with `source` (the authored Soundboard) for traceability.
     """
-    mesh = bpy.data.meshes.get(name)
-    if mesh is not None:
+    from . import generated
+
+    _root, _bonding, results_collection = generated.ensure_generated_collections(context.scene)
+    obj = next(
+        (o for o in context.scene.objects if o.soundboard_lab.generated_kind == 'MODE_SHAPE'),
+        None,
+    )
+    if obj is not None and obj.type == 'MESH':
+        mesh = obj.data
         mesh.clear_geometry()
     else:
         mesh = bpy.data.meshes.new(name)
 
-    vertices = [(x, y, z + surface_offset) for (x, y), z in zip(xy, top_z)]
+    vertices = [(x, y, z) for (x, y), z in zip(xy, top_z)]
     mesh.from_pydata(vertices, [], [tuple(tri) for tri in triangles])
     mesh.update()
 
@@ -546,12 +617,13 @@ def build_mode_shape_preview(
         r, g, b = _jet_colormap(t)
         color_attr.data[i].color = (r, g, b, 1.0)
 
-    obj = bpy.data.objects.get(name)
     if obj is None:
         obj = bpy.data.objects.new(name, mesh)
-        context.collection.objects.link(obj)
-    else:
-        obj.data = mesh
+        results_collection.objects.link(obj)
+        obj.soundboard_lab.generated_kind = 'MODE_SHAPE'
+        obj.hide_render = True
+    generated.link_exclusively(obj, results_collection)
+    obj.soundboard_lab.source_object = source
 
     _set_viewport_vertex_color_shading()
     return obj
@@ -643,6 +715,14 @@ def _apply_result(scene, result: dict) -> None:
                 message += f" | mesh repaired ({problems})"
                 if repair["components_removed"]:
                     message += f", removed {repair['components_removed']} disconnected piece(s)"
+        bonded = result.get("bonded_bodies") or []
+        if bonded:
+            message += f" | {len(bonded)} bonded bodies tied"
+        for placed in result.get("point_attachments") or []:
+            message += (
+                f" | {placed['name']} on {placed['body']} ({placed['nodes']} nodes, "
+                f"{placed['snap_distance']:.2f} mm snap)"
+            )
         scene.soundboard_lab_message = message
         for mode in result["modes"]:
             item = scene.soundboard_lab_results.add()
@@ -696,6 +776,11 @@ def _update_mode_shape_preview(scene) -> None:
     z_displacement = _last_mode_shapes.get(str(item.mode_number))
     if z_displacement is None:
         return
+    try:
+        soundboard_obj = find_soundboard_object(bpy.context)
+    except SoundboardLabSceneError as exc:
+        soundboard_obj = None
+        print(f"Soundboard Lab: couldn't find the soundboard for the preview (non-fatal): {exc!r}")
     build_mode_shape_preview(
         bpy.context,
         "Soundboard Mode Shape Preview",
@@ -703,13 +788,10 @@ def _update_mode_shape_preview(scene) -> None:
         _last_mesh_shape["top_z"],
         _last_mesh_shape["triangles"],
         z_displacement,
+        source=soundboard_obj,
     )
-    try:
-        soundboard_obj = find_soundboard_object(bpy.context)
-    except SoundboardLabSceneError as exc:
-        print(f"Soundboard Lab: couldn't update soundboard visibility (non-fatal): {exc!r}")
-        return
-    _set_soundboard_visibility(soundboard_obj, visible=False)
+    if soundboard_obj is not None:
+        _set_soundboard_visibility(soundboard_obj, visible=False)
 
 
 def _on_selected_mode_index_update(self, context):
@@ -769,6 +851,17 @@ class SOUNDBOARD_OT_analyze(bpy.types.Operator):
             scene = context.scene
             material = extract_material(obj.active_material) if obj.active_material is not None else None
             orientation = _compute_grain_orientation(obj)
+            from . import bonds  # lazy: bonds imports this module
+            bonded, excluded = bonds.gather_bonded_bodies(context)
+            bonded_bodies = [
+                {
+                    "object": body,
+                    "material": extract_material(body.active_material) if body.active_material is not None else None,
+                    "orientation": _compute_grain_orientation(body),
+                    "terminal": bonds.terminal_spec(body),
+                }
+                for body in bonded
+            ]
             _active_handle = start_solve(
                 context,
                 obj,
@@ -779,6 +872,9 @@ class SOUNDBOARD_OT_analyze(bpy.types.Operator):
                 num_layers=obj.soundboard_lab.mesh_num_layers,
                 material=material,
                 orientation=orientation,
+                bonded_bodies=bonded_bodies,
+                tie_tolerance=scene.soundboard_lab_bond_tolerance,
+                attachments=gather_point_attachments(context),
             )
         except (SoundboardLabSceneError, FileNotFoundError) as exc:
             self.report({'ERROR'}, str(exc))
@@ -789,7 +885,10 @@ class SOUNDBOARD_OT_analyze(bpy.types.Operator):
         context.scene.soundboard_lab_results.clear()
         context.scene.soundboard_lab_steps.clear()
         bpy.app.timers.register(_poll_timer, first_interval=0.5)
-        self.report({'INFO'}, f"Soundboard Lab: solving '{obj.name}'...")
+        if excluded:
+            self.report({'WARNING'}, f"Not bonded, left out of the solve: {', '.join(excluded)}")
+        else:
+            self.report({'INFO'}, f"Soundboard Lab: solving '{obj.name}' + {len(bonded_bodies)} bonded bodies...")
         return {'FINISHED'}
 
 

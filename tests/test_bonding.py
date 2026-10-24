@@ -11,11 +11,18 @@ import pytest
 import trimesh
 
 from soundboard_lab.bonding import (
+    BodyInput,
+    BondStatus,
+    classify_bond,
+    detect_bonds,
     find_contact_footprint,
     find_contact_footprint_from_files,
     find_contact_footprint_from_meshed_body,
+    shell_surface,
+    tet_boundary_skin,
 )
-from soundboard_lab.mesh import mesh_surface
+from soundboard_lab.mesh import mesh_box, mesh_surface
+from soundboard_lab.shell_mesh import ShellMesh
 
 DATA_DIR = Path(__file__).parent / "data" / "bonding_exercise"
 
@@ -136,3 +143,97 @@ def test_raw_design_stl_undercounts_contact_vs_real_meshed_body():
     # the whole meshed rib -- the fix made detection richer, not
     # indiscriminate.
     assert 0.0 < fine.contact_fraction < 0.5, fine.contact_fraction
+
+# ---------------------------------------------------------------------------
+# Solver-mesh-based detection (detect_bonds and its building blocks)
+# ---------------------------------------------------------------------------
+
+PLATE = _box((100, 100, 2), translation=(0, 0, 1))  # z in [0, 2]
+
+
+def _block_skin(origin, size=10.0, element_size=2.5):
+    return tet_boundary_skin(mesh_box(size, size, size, element_size=element_size, origin=origin))
+
+
+def test_tet_boundary_skin_is_closed_and_outward():
+    points, triangles = _block_skin((0, 0, 0))
+    skin = trimesh.Trimesh(points, triangles, process=False)
+    assert skin.is_watertight
+    assert skin.volume == pytest.approx(1000.0, rel=1e-6), "positive volume = outward winding"
+
+
+def test_shell_surface_is_closed_solid_of_the_footprint():
+    shell = ShellMesh(
+        xy=np.array([[0, 0], [10, 0], [10, 20], [0, 20]], dtype=float),
+        triangles=np.array([[0, 1, 2], [0, 2, 3]]),
+        bottom_z=np.zeros(4),
+        top_z=np.full(4, 2.0),
+    )
+    surface = shell_surface(shell)
+    assert surface.is_watertight
+    assert surface.volume == pytest.approx(400.0)
+
+
+def test_block_resting_on_plate_is_contact_with_its_footprint_area():
+    points, triangles = _block_skin((-5, -5, 2))
+    detection = classify_bond(points, triangles, PLATE, tolerance=0.1)
+    assert detection.status is BondStatus.CONTACT
+    assert detection.contact_area == pytest.approx(100.0, rel=1e-6)
+    assert detection.max_penetration <= 0.1
+
+
+def test_block_above_gap_is_not_touching_and_reports_the_gap():
+    points, triangles = _block_skin((-5, -5, 2.5))
+    detection = classify_bond(points, triangles, PLATE, tolerance=0.1)
+    assert detection.status is BondStatus.NOT_TOUCHING
+    assert detection.contact_area == 0.0
+    assert detection.nearest_distance == pytest.approx(0.5, abs=1e-6)
+
+
+def test_block_sunk_into_plate_is_interpenetrating():
+    points, triangles = _block_skin((-5, -5, 1.0))
+    detection = classify_bond(points, triangles, PLATE, tolerance=0.1)
+    assert detection.status is BondStatus.INTERPENETRATING
+    assert detection.max_penetration == pytest.approx(1.0, abs=1e-6)
+
+
+def test_soundboard_poking_into_body_between_its_nodes_is_interpenetrating():
+    """A thin Soundboard edge entering a coarse body that has no skin
+    node inside the Soundboard -- the body-side check alone sees only
+    clearance, so the reverse (Soundboard-inside-body) check must catch it.
+    """
+    strip = _box((100, 6, 2), translation=(0, 0, 1))  # x in [-50, 50], y in [-3, 3], z in [0, 2]
+    block = _box((10, 10, 10), translation=(50, 0, 1))  # straddles the strip's x=50 end
+    detection = classify_bond(np.asarray(block.vertices), np.asarray(block.faces), strip, tolerance=0.1)
+    assert not detection.penetrating_vertex_mask.any(), "sanity: no body vertex is inside the strip"
+    assert detection.status is BondStatus.INTERPENETRATING
+    assert detection.soundboard_penetration == pytest.approx(2.0, abs=1e-6)
+
+
+def test_rejects_nonpositive_tolerance_for_classify_bond():
+    points, triangles = _block_skin((-5, -5, 2))
+    with pytest.raises(ValueError):
+        classify_bond(points, triangles, PLATE, tolerance=0.0)
+
+
+def test_detect_bonds_on_real_fixtures(tmp_path):
+    """Real geometry against the solver-meshed Soundboard: every rib and
+    the bridge plate are candidate bonds; rib1's contact area matches
+    its real 300 x 6 mm glue footprint; an unreadable body is reported
+    per body instead of aborting the others.
+    """
+    bodies = {name: BodyInput(DATA_DIR / f"{name}.stl", element_size=2.0)
+              for name in ("rib1", "rib2", "rib3", "rib4", "bridge_plate2")}
+    bodies["missing"] = BodyInput(tmp_path / "does_not_exist.stl", element_size=2.0)
+
+    report = detect_bonds(DATA_DIR / "soundboard.stl", bodies, soundboard_element_size=10.0, tolerance=0.1)
+
+    assert report.soundboard_surface.is_watertight
+    for name in ("rib1", "rib2", "rib3", "rib4", "bridge_plate2"):
+        assert report.bodies[name].status is BondStatus.CONTACT, (name, report.bodies[name])
+    assert report.bodies["rib1"].detection.contact_area == pytest.approx(1800.0, rel=1e-3)
+
+    missing = report.bodies["missing"]
+    assert missing.status is BondStatus.GEOMETRY_ERROR
+    assert missing.detection is None
+    assert missing.message

@@ -9,6 +9,7 @@ sys.path.insert(0, r"C:\GlyphstoneCloud\CloudStation\LocalDev\gmode\addon")
 
 import bmesh
 import bpy
+from mathutils import Matrix
 import soundboard_lab as addon
 from pathlib import Path
 
@@ -213,7 +214,7 @@ assert "mesh_num_layers" in obj.soundboard_lab.bl_rna.properties
 assert obj.soundboard_lab.mesh_num_layers == 3  # default
 print("Global solution parameters (Scene-level) check passed")
 
-# --- 'Body/Lining' boundary condition: validated, not yet implemented ---
+# --- 'Body/Lining' boundary condition: scene validation ---
 # check_body_lining_boundary_condition is a no-op unless BODY_LINING is
 # actually selected -- must not raise for the default/other choices.
 addon.analysis.check_body_lining_boundary_condition(bpy.context)
@@ -232,16 +233,31 @@ try:
 except addon.analysis.SoundboardLabSceneError as exc:
     assert "no body/lining" in str(exc).lower(), str(exc)
 
-# Add a real Body/Lining-role object: the error must now be about it not
-# being implemented yet, not about a missing object.
+# Add a real Body/Lining-role object: the check now passes; a second
+# lining is ambiguous and must be rejected.
 lining_obj = bpy.data.objects.new("Lining Test Object", bpy.data.meshes.new("Lining Test Mesh"))
 bpy.context.collection.objects.link(lining_obj)
 lining_obj.soundboard_lab.role = 'LINING'
+addon.analysis.check_body_lining_boundary_condition(bpy.context)
+lining_obj2 = bpy.data.objects.new("Lining Test Object 2", bpy.data.meshes.new("Lining Test Mesh 2"))
+bpy.context.collection.objects.link(lining_obj2)
+lining_obj2.soundboard_lab.role = 'LINING'
 try:
     addon.analysis.check_body_lining_boundary_condition(bpy.context)
-    assert False, "expected a SoundboardLabSceneError (not yet implemented)"
+    assert False, "expected a SoundboardLabSceneError (two Body/Lining objects)"
 except addon.analysis.SoundboardLabSceneError as exc:
-    assert "not yet implemented" in str(exc).lower(), str(exc)
+    assert "multiple" in str(exc).lower(), str(exc)
+bpy.data.objects.remove(lining_obj2, do_unlink=True)
+
+# Spring terminal without a stiffness is rejected before any solve.
+lining_obj.soundboard_lab.terminal_condition = 'SPRING'
+try:
+    addon.bonds.terminal_spec(lining_obj)
+    assert False, "expected a SoundboardLabSceneError (zero spring stiffness)"
+except addon.analysis.SoundboardLabSceneError as exc:
+    assert "stiffness" in str(exc).lower(), str(exc)
+lining_obj.soundboard_lab.terminal_stiffness = 5000.0
+assert addon.bonds.terminal_spec(lining_obj) == {"condition": "spring", "stiffness": 5000.0}
 
 bpy.data.objects.remove(lining_obj, do_unlink=True)
 bpy.context.scene.soundboard_lab_boundary_condition = 'FIXED_EDGE'
@@ -330,13 +346,23 @@ assert abs(stored_freq - expected_freq) < 1e-3 * abs(expected_freq), (stored_fre
 # Selecting a mode (as the UIList binding does via its update callback)
 # must build/replace the real "Soundboard Mode Shape Preview" object.
 bpy.context.scene.soundboard_lab_selected_mode_index = 0
-preview_obj = bpy.data.objects.get("Soundboard Mode Shape Preview")
-assert preview_obj is not None, "selecting a mode should build the mode-shape preview object"
+preview_objs = [o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_SHAPE']
+assert len(preview_objs) == 1, "selecting a mode should build exactly one tagged mode-shape preview object"
+preview_obj = preview_objs[0]
 assert len(preview_obj.data.vertices) == len(result["mesh_shape"]["xy"])
 assert "ModeShapeZ" in preview_obj.data.color_attributes
+_root, _bonding, results_coll = addon.generated.ensure_generated_collections(bpy.context.scene)
+assert list(preview_obj.users_collection) == [results_coll], "preview must live only in Analysis Results"
+assert preview_obj.soundboard_lab.source_object == fixture_obj
+assert results_coll.get(addon.generated.COLLECTION_TAG) == "results"
+assert _root.name in bpy.context.scene.collection.children
+# Generated objects are never assembly inputs, even if a role is set.
+preview_obj.soundboard_lab.role = 'SOUNDBOARD'
+assert addon.analysis.find_soundboard_object(bpy.context) == fixture_obj
+preview_obj.soundboard_lab.role = 'NONE'
 print("Mode selection -> preview rebuild check passed")
 
-# Real GUI bug, confirmed live: a fixed-size surface_offset alone isn't
+# Real GUI bug, confirmed live: a fixed-size display offset isn't
 # enough -- depth-buffer precision degrades with camera distance, so
 # the same offset that looks fine up close Z-fights again once zoomed
 # out. The real fix is to hide the original soundboard object while a
@@ -376,18 +402,16 @@ assert tuple(color_attr.data[0].color) == (0.0, 0.0, 1.0, 1.0), "min displacemen
 assert tuple(color_attr.data[1].color) == (0.0, 1.0, 0.0, 1.0), "mid displacement should be pure green"
 assert tuple(color_attr.data[2].color) == (1.0, 0.0, 0.0, 1.0), "max displacement should be pure red"
 
-# Real GUI bug, confirmed: the preview mesh sitting at the exact same
-# world-space Z as the original soundboard's top surface Z-fights with
-# it in the viewport. Must sit strictly above the real top_z, not
-# coincide with it.
+# No display offset: generated objects sit on true geometry (Z-fighting
+# with the authored soundboard is handled by hiding it, checked above).
 for v, expected_top_z in zip(preview_obj.data.vertices, preview_top_z):
-    assert v.co.z > expected_top_z, "preview mesh must be offset above the real top surface, not coincide with it"
+    assert v.co.z == expected_top_z, "preview mesh must sit exactly on the solved top surface (no display offset)"
 
-# Re-calling with the same name must replace, not duplicate, the object.
+# Re-calling must replace, not duplicate, the tagged object.
 addon.analysis.build_mode_shape_preview(
     bpy.context, "Smoke Test Mode Preview", preview_xy, preview_top_z, preview_triangles, preview_dz
 )
-assert len([o for o in bpy.data.objects if o.name.startswith("Smoke Test Mode Preview")]) == 1
+assert len([o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_SHAPE']) == 1
 
 # Asymmetric (one-signed) mode case -- a real, confirmed scenario, not
 # hypothetical: a real solve's mode 1 ranged -244.6 to +0.18, almost
@@ -397,15 +421,269 @@ assert len([o for o in bpy.data.objects if o.name.startswith("Smoke Test Mode Pr
 # Symmetric-around-zero normalization must keep zero at green
 # regardless of which way a mode happens to be signed.
 asymmetric_dz = [-10.0, 0.0, 1.0, -5.0]  # bound = max(|-10|, |1|) = 10
-addon.analysis.build_mode_shape_preview(
+asym_obj = addon.analysis.build_mode_shape_preview(
     bpy.context, "Smoke Test Asymmetric Mode", preview_xy, preview_top_z, preview_triangles, asymmetric_dz
 )
-asym_attr = bpy.data.objects["Smoke Test Asymmetric Mode"].data.color_attributes["ModeShapeZ"]
+asym_attr = asym_obj.data.color_attributes["ModeShapeZ"]
 assert tuple(asym_attr.data[1].color) == (0.0, 1.0, 0.0, 1.0), "zero displacement must stay green even when a mode is one-signed"
 assert tuple(asym_attr.data[0].color) == (0.0, 0.0, 1.0, 1.0), "the most-negative vertex should still be pure blue"
 
 print("build_mode_shape_preview check passed")
 
+# --- Bond detection: generated collections, proxies, results, staleness ---
+# Real subprocess run on the bonding_exercise fixtures (ribs/bridge plate
+# sit on the soundboard within the 0.1 tolerance).
+BOND_DATA = Path(r"C:\GlyphstoneCloud\CloudStation\LocalDev\gmode\tests\data\bonding_exercise")
+obj.soundboard_lab.role = 'NONE'
+bond_objs = {}
+for stem, role, element_size in (
+    ("soundboard", 'SOUNDBOARD', 10.0),
+    ("rib1", 'RIB', 2.0),
+    ("bridge_plate2", 'BRIDGE_PLATE', 2.0),
+):
+    bpy.ops.wm.stl_import(filepath=str(BOND_DATA / f"{stem}.stl"))
+    imported = bpy.context.selected_objects[0]
+    imported.soundboard_lab.role = role
+    imported.soundboard_lab.mesh_element_size = element_size
+    bond_objs[stem] = imported
+
+assert addon.bonds.bond_color(0.0, 0.1)[:3] == (0.1, 0.9, 0.2), "exact contact should be green"
+assert addon.bonds.bond_color(0.5, 0.1)[0] == 1.0 and addon.bonds.bond_color(0.5, 0.1)[1] < 0.2, "penetration is red"
+assert addon.bonds.bond_color(-0.3, 0.1) == (1.0, 0.5, 0.0, 0.6), "near gap is orange"
+assert addon.bonds.bond_color(-5.0, 0.1)[3] < 0.2, "far surface is faint"
+
+bond_bodies = addon.bonds.find_bond_bodies(bpy.context)
+assert {b.name for b in bond_bodies} == {bond_objs["rib1"].name, bond_objs["bridge_plate2"].name}
+bond_handle = addon.bonds.start_bond_detection(
+    bpy.context, bond_objs["soundboard"], bond_bodies, ENGINE_PYTHON, 0.1
+)
+bond_result = None
+for _ in range(600):
+    bond_result = addon.analysis.poll_solve(bond_handle)
+    if bond_result is not None:
+        break
+    time.sleep(0.5)
+assert bond_result is not None, "bond detection subprocess did not finish in time"
+assert bond_result["status"] == "ok", bond_result
+addon.bonds.apply_bond_result(bpy.context, bond_result, bond_handle)
+
+scene = bpy.context.scene
+assert scene.soundboard_lab_bond_status == 'DONE', scene.soundboard_lab_bond_message
+bond_rows = {item.name: item for item in scene.soundboard_lab_bond_results}
+assert set(bond_rows) == {bond_objs["rib1"].name, bond_objs["bridge_plate2"].name}
+for name, item in bond_rows.items():
+    assert item.status == 'CONTACT', (name, item.status, item.message)
+    assert item.contact_area > 0
+    assert item.proxy_object is not None
+    assert item.source_object == bpy.data.objects[name]
+print("Bond rows:", {n: (i.status, round(i.contact_area, 1)) for n, i in bond_rows.items()})
+
+_root, bonding_coll, results_coll = addon.generated.ensure_generated_collections(scene)
+assert bonding_coll.get(addon.generated.COLLECTION_TAG) == "bonding"
+assert len([c for c in scene.collection.children if c.get(addon.generated.COLLECTION_TAG) == "root"]) == 1, \
+    "collections must be found by tag, not duplicated"
+proxies = [o for o in scene.objects if o.soundboard_lab.generated_kind in addon.generated.BOND_PROXY_KINDS]
+assert len(proxies) == 3, [o.name for o in proxies]
+for proxy in proxies:
+    assert list(proxy.users_collection) == [bonding_coll]
+    assert proxy.soundboard_lab.role == 'NONE'
+    assert proxy.hide_render
+    assert proxy.matrix_world == Matrix.Identity(4), "proxies sit at identity with world-space vertices"
+    assert proxy.soundboard_lab.source_fingerprint
+    assert not proxy.soundboard_lab.bond_stale
+rib_proxy = bond_rows[bond_objs["rib1"].name].proxy_object
+assert addon.bonds.BOND_DISTANCE_ATTR in rib_proxy.data.attributes
+assert addon.bonds.BOND_STATUS_ATTR in rib_proxy.data.color_attributes
+sb_proxy = next(o for o in proxies if o.soundboard_lab.generated_kind == 'SOUNDBOARD_PROXY')
+assert sb_proxy.soundboard_lab.source_object == bond_objs["soundboard"]
+assert addon.analysis.find_soundboard_object(bpy.context) == bond_objs["soundboard"], \
+    "proxies must never count as assembly bodies"
+assert len(addon.bonds.find_bond_bodies(bpy.context)) == 2
+assert addon.bonds.check_bond_staleness(scene, bpy.context.evaluated_depsgraph_get()) == 0, \
+    "fresh proxies must not read as stale"
+
+# Refresh replaces only tagged proxies; user objects placed in the
+# generated collection survive.
+user_mesh = bpy.data.meshes.new("User Note Mesh")
+user_obj = bpy.data.objects.new("User Note", user_mesh)
+bonding_coll.objects.link(user_obj)
+addon.bonds.apply_bond_result(bpy.context, bond_result, bond_handle)
+assert bpy.data.objects.get("User Note") is not None, "refresh must not delete user objects"
+assert user_obj.name in bonding_coll.objects
+proxies = [o for o in scene.objects if o.soundboard_lab.generated_kind in addon.generated.BOND_PROXY_KINDS]
+assert len(proxies) == 3, "refresh must replace, not accumulate, proxies"
+assert not any(m.name.startswith("Bond Proxy") and m.users == 0 for m in bpy.data.meshes), "orphaned proxy meshes"
+print("Bond proxies / collections / refresh check passed")
+
+# Staleness: moving a rib flags its proxy (and its result row) out of date.
+rib_obj = bond_objs["rib1"]
+rib_row = scene.soundboard_lab_bond_results[rib_obj.name]
+plate_row = scene.soundboard_lab_bond_results[bond_objs["bridge_plate2"].name]
+rib_obj.location.z += 1.0
+bpy.context.view_layer.update()
+print("depsgraph handler flagged stale during view_layer.update():", rib_row.proxy_object.soundboard_lab.bond_stale)
+assert addon.bonds.check_bond_staleness(scene, bpy.context.evaluated_depsgraph_get()) == 1
+assert rib_row.proxy_object.soundboard_lab.bond_stale
+assert addon.bonds.result_is_stale(scene, rib_row)
+assert not addon.bonds.result_is_stale(scene, plate_row)
+rib_obj.location.z -= 1.0
+bpy.context.view_layer.update()
+assert addon.bonds.check_bond_staleness(scene, bpy.context.evaluated_depsgraph_get()) == 0, \
+    "moving back to the detected position should clear the stale flag"
+# Moving the soundboard makes every result stale.
+bond_objs["soundboard"].location.x += 2.0
+bpy.context.view_layer.update()
+addon.bonds.check_bond_staleness(scene, bpy.context.evaluated_depsgraph_get())
+assert addon.bonds.result_is_stale(scene, plate_row)
+print("Bond staleness check passed")
+
+# --- Assembly solve: GO! gating + bonded bodies tied into the solve ---
+try:
+    addon.bonds.gather_bonded_bodies(bpy.context)
+    raise AssertionError("stale bond results must block the solve")
+except addon.analysis.SoundboardLabSceneError as exc:
+    assert "out of date" in str(exc), exc
+bond_objs["soundboard"].location.x -= 2.0
+bpy.context.view_layer.update()
+assert addon.bonds.check_bond_staleness(scene, bpy.context.evaluated_depsgraph_get()) == 0
+bonded, excluded = addon.bonds.gather_bonded_bodies(bpy.context)
+assert {b.name for b in bonded} == {bond_objs["rib1"].name, bond_objs["bridge_plate2"].name}, bonded
+assert excluded == []
+
+
+def _world_points(obj):
+    return [obj.matrix_world @ v.co for v in obj.data.vertices]
+
+
+rib_pts = _world_points(bond_objs["rib1"])
+rib_top_z = max(p.z for p in rib_pts)
+rib_top = [p for p in rib_pts if p.z > rib_top_z - 1e-3]
+board_pts = _world_points(bond_objs["soundboard"])
+board_bottom_z = min(p.z for p in board_pts)
+compensator = bpy.data.objects.new("Compensator", None)
+compensator.location = (
+    sum(p.x for p in rib_top) / len(rib_top), sum(p.y for p in rib_top) / len(rib_top), rib_top_z
+)
+bridge_mass = bpy.data.objects.new("BridgeMass", None)
+bridge_mass.location = (compensator.location.x, compensator.location.y, board_bottom_z)
+for empty in (compensator, bridge_mass):
+    scene.collection.objects.link(empty)
+compensator.soundboard_lab.role = 'POINT_ATTACHMENT'
+compensator.soundboard_lab.attach_stiffness = 2.72
+compensator.soundboard_lab.attach_mass_g = 3.0
+bridge_mass.soundboard_lab.role = 'MASS_LOAD'
+bridge_mass.soundboard_lab.attach_stiffness = 5.0  # ignored: a Mass Load has no spring
+bridge_mass.soundboard_lab.attach_radius = 10.0
+bpy.context.view_layer.update()
+assert {o.name for o in addon.analysis.find_attachment_objects(bpy.context)} == {"Compensator", "BridgeMass"}
+try:
+    addon.analysis.gather_point_attachments(bpy.context)
+    raise AssertionError("a Mass Load without mass must be rejected")
+except addon.analysis.SoundboardLabSceneError as exc:
+    assert "BridgeMass" in str(exc) and "Mass" in str(exc), exc
+bridge_mass.soundboard_lab.attach_mass_g = 30.0
+attachments = {a["name"]: a for a in addon.analysis.gather_point_attachments(bpy.context)}
+assert abs(attachments["Compensator"]["stiffness"] - 2.72 * 9.80665) < 1e-4, attachments  # float32 property
+assert attachments["BridgeMass"]["stiffness"] == 0.0, attachments
+assert addon.bonds.gather_bonded_bodies(bpy.context) == (bonded, excluded), "Empties are never bodies"
+assembly_handle = addon.analysis.start_solve(
+    bpy.context,
+    bond_objs["soundboard"],
+    CCX_EXE,
+    ENGINE_PYTHON,
+    n_frequencies=6,
+    boundary_condition="fixed_edge",
+    bonded_bodies=[
+        {"object": b, "material": None, "orientation": addon.analysis._compute_grain_orientation(b)}
+        for b in bonded
+    ],
+    tie_tolerance=scene.soundboard_lab_bond_tolerance,
+    attachments=list(attachments.values()),
+)
+assembly_result = None
+for _ in range(1200):  # up to ~10 minutes
+    assembly_result = addon.analysis.poll_solve(assembly_handle)
+    if assembly_result is not None:
+        break
+    time.sleep(0.5)
+assert assembly_result is not None, "assembly solve did not finish in time"
+assert assembly_result["status"] == "ok", assembly_result
+tied = {b["name"]: b["tie_nodes"] for b in assembly_result["bonded_bodies"]}
+assert set(tied) == {b.name for b in bonded} and all(n > 0 for n in tied.values()), tied
+assert assembly_result["modes"][0]["frequency_hz"] > 1.0, "fixed edge must have no rigid modes"
+addon.analysis._apply_result(scene, assembly_result)
+assert "2 bonded bodies tied" in scene.soundboard_lab_message, scene.soundboard_lab_message
+placed = {p["name"]: p for p in assembly_result["point_attachments"]}
+assert placed["Compensator"]["body"] == bond_objs["rib1"].name, placed
+assert placed["BridgeMass"]["body"] == "Soundboard" and placed["BridgeMass"]["nodes"] >= 1, placed
+assert "Compensator on " in scene.soundboard_lab_message, scene.soundboard_lab_message
+for empty in (compensator, bridge_mass):
+    bpy.data.objects.remove(empty, do_unlink=True)
+print("Point attachments passed:", placed)
+print("Assembly solve passed: ties", tied, "f1 =", assembly_result["modes"][0]["frequency_hz"])
+scene.soundboard_lab_results.clear()
+
+# --- Body/Lining: lining is detected like any body, then holds the rim ---
+bpy.ops.wm.stl_import(filepath=str(BOND_DATA / "body_lining.stl"))
+lining = bpy.context.selected_objects[0]
+lining.soundboard_lab.role = 'LINING'
+lining.soundboard_lab.mesh_element_size = 4.0
+bond_objs["body_lining"] = lining
+assert addon.bonds.gather_bonded_bodies(bpy.context)[0], "lining is ignored under Fixed Edge"
+scene.soundboard_lab_boundary_condition = 'BODY_LINING'
+addon.analysis.check_body_lining_boundary_condition(bpy.context)
+try:
+    addon.bonds.gather_bonded_bodies(bpy.context)
+    raise AssertionError("an undetected lining must block a Body/Lining solve")
+except addon.analysis.SoundboardLabSceneError as exc:
+    assert "Detect Bonds" in str(exc), exc
+lining_bodies = addon.bonds.find_bond_bodies(bpy.context)
+assert lining in lining_bodies
+lining_handle = addon.bonds.start_bond_detection(bpy.context, bond_objs["soundboard"], lining_bodies, ENGINE_PYTHON, 0.1)
+lining_bond = None
+for _ in range(600):
+    lining_bond = addon.analysis.poll_solve(lining_handle)
+    if lining_bond is not None:
+        break
+    time.sleep(0.5)
+assert lining_bond is not None and lining_bond["status"] == "ok", lining_bond
+addon.bonds.apply_bond_result(bpy.context, lining_bond, lining_handle)
+assert scene.soundboard_lab_bond_results[lining.name].status == 'CONTACT', scene.soundboard_lab_bond_results[lining.name].message
+bonded, excluded = addon.bonds.gather_bonded_bodies(bpy.context)
+assert lining in bonded and excluded == [], (bonded, excluded)
+lining_solve = addon.analysis.start_solve(
+    bpy.context,
+    bond_objs["soundboard"],
+    CCX_EXE,
+    ENGINE_PYTHON,
+    n_frequencies=4,
+    boundary_condition="body_lining",
+    bonded_bodies=[
+        {"object": b, "material": None, "orientation": addon.analysis._compute_grain_orientation(b),
+         "terminal": addon.bonds.terminal_spec(b)}
+        for b in bonded
+    ],
+    tie_tolerance=scene.soundboard_lab_bond_tolerance,
+)
+lining_result = None
+for _ in range(1200):
+    lining_result = addon.analysis.poll_solve(lining_solve)
+    if lining_result is not None:
+        break
+    time.sleep(0.5)
+assert lining_result is not None and lining_result["status"] == "ok", lining_result
+lining_row = next(b for b in lining_result["bonded_bodies"] if b["name"] == lining.name)
+assert lining_row["tie_nodes"] > 0 and lining_row["terminal_nodes"] > 0, lining_row
+assert lining_result["modes"][0]["frequency_hz"] > 1.0, "a Fixed lining terminal must leave no rigid modes"
+print("Body/Lining solve passed:", lining_row, "f1 =", lining_result["modes"][0]["frequency_hz"])
+scene.soundboard_lab_boundary_condition = 'FIXED_EDGE'
+
+for o in [*bond_objs.values(), user_obj]:
+    bpy.data.objects.remove(o, do_unlink=True)
+generated_before_cleanup = addon.generated.remove_generated_objects(scene, addon.generated.BOND_PROXY_KINDS)
+assert generated_before_cleanup == 4
+scene.soundboard_lab_bond_results.clear()
+obj.soundboard_lab.role = 'SOUNDBOARD'
 
 # Scene-collection errors: zero candidates, then multiple candidates.
 obj.soundboard_lab.role = 'RIB'
@@ -430,5 +708,7 @@ print("=== Soundboard Lab smoke test: unregister ===")
 addon.unregister()
 assert not hasattr(bpy.types.Object, "soundboard_lab"), "Object.soundboard_lab not cleaned up"
 assert not hasattr(bpy.types.Material, "soundboard_lab"), "Material.soundboard_lab not cleaned up"
+assert addon.bonds._on_depsgraph_update not in bpy.app.handlers.depsgraph_update_post, "bond handler not removed"
+assert not hasattr(bpy.types.Scene, "soundboard_lab_bond_results"), "bond results not cleaned up"
 
 print("SMOKE TEST PASSED")

@@ -98,7 +98,10 @@ def mesh_surface(stl_path: Path, element_size: float, angle_deg: float = 40.0) -
         gmsh.merge(str(stl_path))
 
         angle_rad = angle_deg * 3.141592653589793 / 180.0
-        force_parametrizable = False
+        # Split surfaces into patches gmsh can always parametrize: without
+        # it a long thin ring (the rim lining's top/bottom faces) can make
+        # the 2D mesher spin forever -- a hang, not a catchable error.
+        force_parametrizable = True
         include_boundary = True
         curve_angle_rad = 180.0 * 3.141592653589793 / 180.0
         gmsh.model.mesh.classifySurfaces(
@@ -113,6 +116,10 @@ def mesh_surface(stl_path: Path, element_size: float, angle_deg: float = 40.0) -
 
         gmsh.option.setNumber("Mesh.MeshSizeMax", element_size)
         gmsh.option.setNumber("Mesh.ElementOrder", 2)
+        # Straight mid-side nodes: the STL is faceted, so curving them
+        # onto gmsh's reparametrized surface adds no accuracy and can
+        # invert thin tets (seen on the rim lining: nonpositive jacobian).
+        gmsh.option.setNumber("Mesh.SecondOrderLinear", 1)
         gmsh.model.mesh.generate(3)
         with tempfile.TemporaryDirectory() as tmp_dir:
             msh_path = Path(tmp_dir) / "mesh.msh"

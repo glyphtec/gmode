@@ -88,6 +88,34 @@ def test_degenerate_face_is_repaired():
     assert int((~repaired.nondegenerate_faces()).sum()) == 0
 
 
+def _box_with_capped_top():
+    """10 mm box whose flat top is triangulated with a cap: Z sits 1 um
+    off the X-Y segment, as Blender's n-gon triangulation leaves them."""
+    box = _box()
+    keep = ~np.all(np.isclose(box.face_normals, [0, 0, 1]), axis=1)
+    A, B, C, D = (-5, -5), (5, -5), (5, 5), (-5, 5)
+    X, Y, Z = (-2, 0), (2, 0), (0, 0.001)
+    top = [(A, B, Y), (A, Y, X), (A, X, D), (B, C, Y), (X, Y, Z), (Y, C, Z), (Z, C, D), (X, Z, D)]
+    top_tris = np.array([[(x, y, 5.0) for x, y in tri] for tri in top])
+    tris = np.vstack([box.vertices[box.faces[keep]], top_tris])
+    return trimesh.Trimesh(**trimesh.triangles.to_kwargs(tris), process=True)
+
+
+def test_coplanar_cap_triangles_are_flipped():
+    capped = _box_with_capped_top()
+    assert capped.is_watertight
+    assert np.degrees(capped.face_angles).max() > 179
+
+    vertices, faces, report = repair_mesh(capped.vertices, capped.faces)
+    assert report.was_already_valid
+    assert report.cap_triangles_flipped >= 1
+    repaired = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    assert repaired.is_watertight and repaired.is_winding_consistent
+    assert np.isclose(repaired.volume, 1000.0)
+    assert np.array_equal(vertices, capped.vertices)
+    assert np.degrees(repaired.face_angles).max() < 170
+
+
 def test_unrepairable_mesh_raises_clearly():
     """A single flat triangle can never become a watertight solid --
     must fail loudly, not hand ambiguous geometry to gmsh.
