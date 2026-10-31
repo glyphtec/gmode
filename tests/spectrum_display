@@ -1,0 +1,148 @@
+import re
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from scipy.signal import find_peaks
+
+
+PEAK_PROMINENCE_DB = 3.0
+PEAK_SPACING_HZ = 20.0
+MAX_PEAK_LABELS = 6  # Per spectrum, within the displayed frequency range.
+DISPLAY_RANGE_HZ = (50, 600)
+
+
+def prominent_peak_indices(frequencies, levels):
+  candidates, _ = find_peaks(levels, prominence=PEAK_PROMINENCE_DB)
+  candidates = [
+      i for i in candidates
+      if DISPLAY_RANGE_HZ[0] <= frequencies[i] <= DISPLAY_RANGE_HZ[1]
+  ]
+  selected = []
+  for i in sorted(candidates, key=lambda i: levels[i], reverse=True):
+    if all(abs(frequencies[i] - frequencies[j]) >= PEAK_SPACING_HZ for j in selected):
+      selected.append(i)
+      if len(selected) >= MAX_PEAK_LABELS:
+        break
+  return sorted(selected)
+
+
+def label_peaks(ax, frequencies, levels, indices, color, offset):
+  for i in indices:
+    ax.plot(frequencies[i], levels[i], 'o', color=color, markersize=3)
+    ax.annotate(
+        f'{frequencies[i]:.1f} Hz',
+        xy=(frequencies[i], levels[i]),
+        xytext=(0, offset),
+        textcoords='offset points',
+        ha='center',
+        va='bottom',
+        fontsize=8,
+        color=color,
+        bbox=dict(facecolor='white', edgecolor='none', alpha=0.8, pad=1),
+        arrowprops=dict(arrowstyle='-', color=color, linewidth=0.6),
+    )
+
+
+def load_spectrum(filepath):
+  with open(filepath, 'rb') as f:
+    text = f.read().decode('latin-1')
+  pattern = re.compile(
+      r'^\s*([0-9]+\.[0-9]+)\s+([-+]?[0-9]+\.[0-9]+)\s*$', re.MULTILINE
+  )
+  matches = pattern.findall(text)
+  df = pd.DataFrame(matches, columns=['Frequency', 'Level_dB']).astype(float)
+  return df
+
+
+# 1. Load datasets
+files = {
+    'Unstrung Unweighted': 'data/guitar_spectrum/sola unstrung unweighted 8-11.txt',
+    'Unstrung Weighted': 'data/guitar_spectrum/sola unstrung-weighted 8-11.txt',
+    'Strung': 'data/guitar_spectrum/Sola strung 8-11.txt',
+}
+
+data = {name: load_spectrum(path) for name, path in files.items()}
+
+# 2. Compute Normalizations
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 10), sharex=True)
+colors = {
+    'Unstrung Unweighted': '#2ca02c',
+    'Unstrung Weighted': '#1f77b4',
+    'Strung': '#d62728',
+}
+
+for series_index, (name, df) in enumerate(data.items()):
+  # Subset to audible guitar range
+  df_sub = df[(df['Frequency'] >= 40) & (df['Frequency'] <= 1000)].copy()
+
+  # Linear power & total energy
+  power = 10 ** (df['Level_dB'] / 10.0)
+  total_energy_db = 10 * np.log10(np.sum(power))
+
+  # Energy-normalized level (relative to total integrated energy)
+  norm_energy = df_sub['Level_dB'] - total_energy_db
+
+  # Peak-normalized level (0 dB peak)
+  norm_peak = df_sub['Level_dB'] - df_sub['Level_dB'].max()
+
+  ax1.plot(
+      df_sub['Frequency'],
+      norm_energy,
+      label=f'{name} (E_tot: {total_energy_db:.1f} dB)',
+      color=colors[name],
+      linewidth=1.4,
+  )
+  ax2.plot(
+      df_sub['Frequency'],
+      norm_peak,
+      label=f"{name} (Peak at {df.loc[df['Level_dB'].idxmax(), 'Frequency']:.1f} Hz)",
+      color=colors[name],
+      linewidth=1.4,
+  )
+  frequencies = df_sub['Frequency'].to_numpy()
+  peaks = prominent_peak_indices(frequencies, df_sub['Level_dB'].to_numpy())
+  for ax, levels in ((ax1, norm_energy), (ax2, norm_peak)):
+    label_peaks(
+        ax, frequencies, levels.to_numpy(), peaks,
+        colors[name], 10 + 16 * series_index,
+    )
+
+# Formatting Energy-Normalized Subplot
+ax1.set_title(
+    'Total Energy Normalized Spectrum (Area-Normalized Power)',
+    fontsize=13,
+    fontweight='bold',
+)
+ax1.set_ylabel('Normalized Level (dB re Total Energy)', fontsize=11)
+ax1.grid(True, which='both', linestyle='--', alpha=0.5)
+ax1.legend(loc='upper right', framealpha=0.9)
+ax1.tick_params(axis='x', labelbottom=True)
+
+# Formatting Peak-Normalized Subplot
+ax2.set_title(
+    'Peak Normalized Spectrum (0 dB Reference)', fontsize=13, fontweight='bold'
+)
+ax2.set_xlabel('Frequency (Hz)', fontsize=11)
+ax2.set_ylabel('Normalized Level (dB re Peak)', fontsize=11)
+ax2.grid(True, which='both', linestyle='--', alpha=0.5)
+ax2.legend(loc='upper right', framealpha=0.9)
+
+for ax in (ax1, ax2):
+  ax.margins(y=0.35)
+plt.xlim(*DISPLAY_RANGE_HZ)
+plt.tight_layout()
+fig.canvas.draw()
+renderer = fig.canvas.get_renderer()
+for ax in (ax1, ax2):
+  occupied = []
+  for annotation in ax.texts:
+    box = annotation.get_bbox_patch().get_window_extent(renderer).expanded(1.05, 1.15)
+    while any(box.overlaps(other) for other in occupied):
+      x, y = annotation.get_position()
+      annotation.set_position((x, y + 10))
+      annotation.update_positions(renderer)
+      annotation.update_bbox_position_size(renderer)
+      box = annotation.get_bbox_patch().get_window_extent(renderer).expanded(1.05, 1.15)
+    occupied.append(box)
+plt.savefig('sola_normalized_spectra_comparison.png', dpi=300)
+plt.show()
