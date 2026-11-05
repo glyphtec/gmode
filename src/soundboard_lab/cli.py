@@ -34,6 +34,8 @@ from pathlib import Path
 from soundboard_lab.assembly import (
     IDENTITY_ORIENTATION,
     AssemblyBody,
+    BridgeProbe,
+    DrivePoint,
     PointAttachment,
     Terminal,
     write_assembly_frequency_inp,
@@ -46,6 +48,7 @@ from soundboard_lab.materials import (
     validate_material,
 )
 from soundboard_lab.mesh import mesh_surface, write_frequency_inp_orthotropic
+from soundboard_lab.mobility import KGF_TO_N, evaluate_bridge_mobility
 from soundboard_lab.repair import MeshRepairError, repair_stl
 from soundboard_lab.shell_mesh import mode_shape_z_displacement, shell_from_closed_mesh, write_shell_frequency_inp
 from soundboard_lab.solver import CcxError, parse_eigenfrequencies, parse_frd_mode_displacements, run_ccx
@@ -59,6 +62,12 @@ SHELL_PIPELINE_STEPS = [
     ("solve", "Solve (CalculiX)"),
     ("parse_results", "Parse results"),
 ]
+SHELL_PIPELINE_STEPS_WITH_MOBILITY = [
+    *SHELL_PIPELINE_STEPS[:4],
+    ("static", "Static bridge load (CalculiX)"),
+    SHELL_PIPELINE_STEPS[4],
+]
+BRIDGE_PROBE_FORCE_KGF = 1.0  # linear model: the compliance does not depend on the load
 
 
 class StepTracker:
@@ -185,6 +194,8 @@ def run_shell_analysis(
     orientation: tuple[float, float, float, float, float, float] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
     bonded_bodies: dict | None = None,
     attachments: list[PointAttachment] | None = None,
+    bridge_probe: BridgeProbe | None = None,
+    mm_mode: int | None = None,
 ) -> None:
     """Shell/extrusion-mesh analysis path (`shell_mesh.py`) -- the
     thin/flat-aware alternative to `run_analysis`'s generic tet path,
@@ -202,6 +213,11 @@ def run_shell_analysis(
     lumped masses) also route through the assembly writer; the result
     lists where each landed under `point_attachments`.
 
+    `bridge_probe` (`assembly.BridgeProbe`) adds the static bridge
+    mobility solve (`mobility.py`): a second, static ccx run whose
+    compliance, with the M1 frequency (or mode `mm_mode`), gives the
+    result's `bridge_mobility` block. It needs a held rim.
+
     `material`/`orientation` default to `SPRUCE_PLACEHOLDER`/identity
     (preserving every existing caller/test that doesn't pass them),
     but the addon now resolves the object's actual assigned Material
@@ -214,7 +230,10 @@ def run_shell_analysis(
     the result JSON -- needed for the addon's mode-shape heat-map
     preview, which `run_analysis`'s tet path has no equivalent of.
     """
-    tracker = StepTracker(status_json, SHELL_PIPELINE_STEPS)
+    tracker = StepTracker(
+        status_json,
+        SHELL_PIPELINE_STEPS if bridge_probe is None else SHELL_PIPELINE_STEPS_WITH_MOBILITY,
+    )
     validate_material(material)
     work_dir = output_json.parent
 
@@ -243,19 +262,28 @@ def run_shell_analysis(
     try:
         tracker.start("write_input")
         inp_path = work_dir / "analysis.inp"
-        if assembly_bodies or attachments:
-            write_result = write_assembly_frequency_inp(
-                shell,
-                material,
+        static_inp_path = work_dir / "analysis_static.inp"
+        if assembly_bodies or attachments or bridge_probe:
+            assembly_kwargs = dict(
                 num_layers=num_layers,
                 bodies=assembly_bodies,
                 tie_tolerance=float((bonded_bodies or {}).get("tolerance", 0.1)),
-                inp_path=inp_path,
                 n_frequencies=n_frequencies,
                 fixed_edge=fixed_edge,
                 soundboard_orientation=orientation,
                 attachments=attachments,
+                probe=bridge_probe,
             )
+            if bridge_probe is not None:
+                # Written first so a missing rim support fails before the long eigen solve.
+                write_assembly_frequency_inp(
+                    shell,
+                    material,
+                    inp_path=static_inp_path,
+                    static_force_n=BRIDGE_PROBE_FORCE_KGF * KGF_TO_N,
+                    **assembly_kwargs,
+                )
+            write_result = write_assembly_frequency_inp(shell, material, inp_path=inp_path, **assembly_kwargs)
         else:
             write_result = write_shell_frequency_inp(
                 shell,
@@ -285,6 +313,15 @@ def run_shell_analysis(
         tracker.fail("solve", str(exc))
         raise
 
+    if bridge_probe is not None:
+        try:
+            tracker.start("static")
+            run_ccx(static_inp_path, ccx_exe)
+            tracker.done("static")
+        except Exception as exc:
+            tracker.fail("static", str(exc))
+            raise
+
     try:
         tracker.start("parse_results")
         modes = parse_eigenfrequencies(inp_path.with_suffix(".dat"))
@@ -295,6 +332,17 @@ def run_shell_analysis(
             ).tolist()
             for m in modes
         }
+        mobility = None
+        if bridge_probe is not None:
+            mobility = evaluate_bridge_mobility(
+                static_inp_path.with_suffix(".dat"),
+                write_result.probe,
+                bridge_probe,
+                BRIDGE_PROBE_FORCE_KGF * KGF_TO_N,
+                modes,
+                mode_displacements,
+                mm_mode,
+            )
         tracker.done("parse_results")
     except Exception as exc:
         tracker.fail("parse_results", str(exc))
@@ -333,6 +381,8 @@ def run_shell_analysis(
             for p in getattr(write_result, "attachments", [])
         ],
     }
+    if mobility is not None:
+        result["bridge_mobility"] = mobility
     output_json.write_text(json.dumps(result))
 
 
@@ -380,6 +430,28 @@ def load_attachments(spec: dict) -> list[PointAttachment]:
     return attachments
 
 
+def load_bridge_probe(spec: dict) -> tuple[BridgeProbe, int | None]:
+    """`{"drive_points": [{name, position: [x,y,z] mm, radius mm}], "read_position":
+    [x,y,z] (optional, default the drive centroid), "read_radius": mm, "mode":
+    int (optional M1 mode override)}` -> (`BridgeProbe`, mode)."""
+    drive_points = []
+    for item in spec.get("drive_points", []):
+        position = tuple(float(v) for v in item["position"])
+        if len(position) != 3:
+            raise ValueError(f"drive point {item.get('name')!r}: position needs 3 coordinates")
+        drive_points.append(DrivePoint(str(item["name"]), position, float(item.get("radius", 5.0))))
+    if not drive_points:
+        raise ValueError("--mobility-json needs at least one drive point")
+    read_position = spec.get("read_position")
+    if read_position is not None:
+        read_position = tuple(float(v) for v in read_position)
+        if len(read_position) != 3:
+            raise ValueError("read_position needs 3 coordinates")
+    probe = BridgeProbe(tuple(drive_points), read_position, float(spec.get("read_radius", 5.0)))
+    mode = spec.get("mode")
+    return probe, (int(mode) if mode is not None else None)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stl", required=True, type=Path)
@@ -413,6 +485,15 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Shell path only: JSON {attachments:[{name, position:[x,y,z], radius, stiffness (N/mm, Z), mass_g}]} "
             "of grounded springs / point masses on the nearest body surface"
+        ),
+    )
+    parser.add_argument(
+        "--mobility-json",
+        type=Path,
+        default=None,
+        help=(
+            "Shell path only: JSON {drive_points:[{name, position:[x,y,z], radius}], read_position, read_radius, mode} "
+            "for the static bridge monopole mobility solve (needs a held rim: fixed_edge or a fixed/spring lining terminal)"
         ),
     )
     parser.add_argument(
@@ -452,6 +533,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.mesh_type != "shell":
                 raise ValueError("--attachments-json requires --mesh-type shell")
             attachments = load_attachments(json.loads(args.attachments_json.read_text()))
+        bridge_probe, mm_mode = None, None
+        if args.mobility_json is not None:
+            if args.mesh_type != "shell":
+                raise ValueError("--mobility-json requires --mesh-type shell")
+            bridge_probe, mm_mode = load_bridge_probe(json.loads(args.mobility_json.read_text()))
         if args.boundary_condition == "body_lining":
             bodies = (bonded_bodies or {}).get("bodies", [])
             if args.mesh_type != "shell" or not any(b.get("terminal") for b in bodies):
@@ -473,6 +559,8 @@ def main(argv: list[str] | None = None) -> int:
                 orientation=orientation,
                 bonded_bodies=bonded_bodies,
                 attachments=attachments,
+                bridge_probe=bridge_probe,
+                mm_mode=mm_mode,
             )
         else:
             run_analysis(

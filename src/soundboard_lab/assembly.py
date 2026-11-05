@@ -95,6 +95,37 @@ class AttachmentPlacement:
 
 
 @dataclass(frozen=True)
+class DrivePoint:
+    """One bridge saddle: where the static bridge load is applied, spread
+    equally over the surface patch like a `PointAttachment`."""
+
+    name: str
+    position: tuple[float, float, float]
+    radius: float = 5.0
+    max_snap_distance: float = 5.0
+
+
+@dataclass(frozen=True)
+class BridgeProbe:
+    """The static bridge-mobility measurement: a downward load shared
+    equally between `drive_points`, with the displacement read at
+    `read_position` (default: the centroid of the drive points)."""
+
+    drive_points: tuple[DrivePoint, ...]
+    read_position: tuple[float, float, float] | None = None
+    read_radius: float = 5.0
+
+
+@dataclass(frozen=True)
+class ProbePlacement:
+    drive_node_ids: list[np.ndarray]  # one patch per drive point, 1-based global ids
+    read_node_ids: np.ndarray
+    drive_placements: list[AttachmentPlacement]
+    read_placement: AttachmentPlacement
+    read_position: tuple[float, float, float]
+
+
+@dataclass(frozen=True)
 class AssemblyBody:
     name: str
     mesh: meshio.Mesh  # tetra10, world space
@@ -110,6 +141,7 @@ class AssemblyInpWriteResult:
     tie_node_counts: dict[str, int]  # slave nodes per body
     terminal_node_counts: dict[str, int] = field(default_factory=dict)  # bodies with a terminal only
     attachments: list[AttachmentPlacement] = field(default_factory=list)
+    probe: ProbePlacement | None = None
 
 
 def _skin_faces(mesh: meshio.Mesh) -> tuple[np.ndarray, np.ndarray]:
@@ -244,7 +276,21 @@ def attachment_node_ids(
         raise ValueError(f"attachment {attachment.name!r}: stiffness and mass must not be negative")
     if attachment.stiffness == 0 and attachment.mass_g == 0:
         raise ValueError(f"attachment {attachment.name!r} has neither a spring stiffness nor a mass")
-    position = np.asarray(attachment.position, dtype=float)
+    return surface_patch(
+        attachment.name, attachment.position, attachment.radius, attachment.max_snap_distance, surfaces, points
+    )
+
+
+def surface_patch(
+    name: str,
+    position: tuple[float, float, float],
+    radius: float,
+    max_snap_distance: float,
+    surfaces: list[_AttachSurface],
+    points: np.ndarray,
+) -> tuple[np.ndarray, AttachmentPlacement]:
+    """The patch lookup shared by attachments and the bridge probe."""
+    position = np.asarray(position, dtype=float)
     best = None
     for surface in surfaces:
         tri_points = points[surface.faces[:, :3]]
@@ -253,18 +299,18 @@ def attachment_node_ids(
         if best is None or distance[0] < best[1]:
             best = (surface, float(distance[0]), closest[0], int(tri_id[0]))
     surface, snap, contact, tri_id = best
-    if snap > attachment.max_snap_distance:
+    if snap > max_snap_distance:
         raise ValueError(
-            f"attachment {attachment.name!r} is {snap:.2f} mm from the nearest body surface "
-            f"(limit {attachment.max_snap_distance:g} mm) -- place it on the surface it acts on"
+            f"attachment {name!r} is {snap:.2f} mm from the nearest body surface "
+            f"(limit {max_snap_distance:g} mm) -- place it on the surface it acts on"
         )
     facing = surface.faces[surface.normals @ surface.normals[tri_id] > 0.5]
     candidates = np.unique(facing)
     distance = np.linalg.norm(points[candidates] - contact, axis=1)
-    nodes = candidates[distance <= attachment.radius] if attachment.radius > 0 else candidates[:0]
+    nodes = candidates[distance <= radius] if radius > 0 else candidates[:0]
     if len(nodes) == 0:
         nodes = candidates[[int(np.argmin(distance))]]
-    return nodes, AttachmentPlacement(attachment.name, surface.label, int(len(nodes)), snap)
+    return nodes, AttachmentPlacement(name, surface.label, int(len(nodes)), snap)
 
 
 def write_assembly_frequency_inp(
@@ -278,6 +324,8 @@ def write_assembly_frequency_inp(
     fixed_edge: bool = False,
     soundboard_orientation: tuple[float, float, float, float, float, float] = IDENTITY_ORIENTATION,
     attachments: list[PointAttachment] | None = None,
+    probe: BridgeProbe | None = None,
+    static_force_n: float | None = None,
 ) -> AssemblyInpWriteResult:
     """Write a `*FREQUENCY` input for the Soundboard plus `bodies`, each
     tied to the Soundboard. Raises `ValueError` if a body has no glue
@@ -288,9 +336,28 @@ def write_assembly_frequency_inp(
     `write_shell_frequency_inp`); bodies get no supports of their own.
     `attachments` add grounded Z springs (SPRING1) and lumped masses
     (MASS elements) on the nearest surface (see `PointAttachment`).
+
+    `probe` locates the bridge drive and read patches (returned in the
+    result either way). With `static_force_n` also given, the step is a
+    `*STATIC` solve instead: that total downward force, shared equally
+    between the drive points, with the displacements of the drive and
+    read patches printed to the `.dat`. A static solve needs the rim
+    held (fixed edge, or a lining terminal that is fixed or spring);
+    otherwise the stiffness matrix is singular and this raises.
     """
     if tie_tolerance <= 0:
         raise ValueError(f"tie_tolerance must be positive, got {tie_tolerance}")
+    if static_force_n is not None:
+        if probe is None:
+            raise ValueError("a static solve needs a bridge probe")
+        if static_force_n <= 0:
+            raise ValueError(f"static_force_n must be positive, got {static_force_n}")
+        rim_held = fixed_edge or any(b.terminal is not None and b.terminal.condition != "free" for b in bodies)
+        if not rim_held:
+            raise ValueError(
+                "the static bridge solve needs a held rim: use a fixed edge, or a lining terminal that is "
+                "fixed or spring (a free rim leaves the model unsupported)"
+            )
     validate_material(soundboard_material)
     for body in bodies:
         validate_material(body.material)
@@ -406,6 +473,10 @@ def write_assembly_frequency_inp(
             lines.append(f"*MASS, ELSET=Eattm{a}")
             lines.append(_real(attachment.mass_g * GRAMS_TO_TONNES / len(node_ids)))
 
+    probe_placement = None
+    if probe is not None:
+        probe_placement = _probe_placement(probe, attach_surfaces, points)
+
     if fixed_edge:
         outer_loop, _holes = classify_boundary_loops(shell.xy, shell.triangles)
         fixed = sorted({int(prisms.corner_node_ids[level, v]) for level in range(num_layers + 1) for v in outer_loop})
@@ -414,7 +485,10 @@ def write_assembly_frequency_inp(
         lines.append("*BOUNDARY")
         lines.append("Nfixed, 1, 3")
 
-    lines += _frequency_step_cards(n_frequencies)
+    if static_force_n is not None:
+        lines += _static_step_cards(probe_placement, static_force_n)
+    else:
+        lines += _frequency_step_cards(n_frequencies)
     Path(inp_path).write_text("\n".join(lines) + "\n")
     return AssemblyInpWriteResult(
         element_count=element_offset,
@@ -422,7 +496,46 @@ def write_assembly_frequency_inp(
         tie_node_counts=tie_counts,
         terminal_node_counts=terminal_counts,
         attachments=placements,
+        probe=probe_placement,
     )
+
+
+def _probe_placement(probe: BridgeProbe, surfaces: list[_AttachSurface], points: np.ndarray) -> ProbePlacement:
+    if not probe.drive_points:
+        raise ValueError("the bridge probe needs at least one drive point")
+    if probe.read_radius < 0 or any(d.radius < 0 for d in probe.drive_points):
+        raise ValueError("bridge probe radius must not be negative")
+    drive_nodes, drive_placements = [], []
+    for drive in probe.drive_points:
+        nodes, placement = surface_patch(
+            f"drive {drive.name}", drive.position, drive.radius, drive.max_snap_distance, surfaces, points
+        )
+        drive_nodes.append(nodes)
+        drive_placements.append(placement)
+    read_position = probe.read_position
+    if read_position is None:
+        read_position = tuple(float(v) for v in np.mean([d.position for d in probe.drive_points], axis=0))
+    read_nodes, read_placement = surface_patch("bridge centre", read_position, probe.read_radius, 5.0, surfaces, points)
+    return ProbePlacement(drive_nodes, read_nodes, drive_placements, read_placement, read_position)
+
+
+def _static_step_cards(placement: ProbePlacement, force_n: float) -> list[str]:
+    """Total `force_n` pushed down (-Z) through the drive patches, equal
+    per drive point and equal per node within a patch."""
+    lines = []
+    per_drive = force_n / len(placement.drive_node_ids)
+    for d, nodes in enumerate(placement.drive_node_ids, start=1):
+        lines.append(f"*NSET, NSET=Ndrive{d}")
+        lines += _id_lines(nodes)
+    lines.append("*NSET, NSET=Nread")
+    lines += _id_lines(placement.read_node_ids)
+    lines += ["*STEP", "*STATIC", "*CLOAD"]
+    for d, nodes in enumerate(placement.drive_node_ids, start=1):
+        lines.append(f"Ndrive{d}, 3, {_real(-per_drive / len(nodes))}")
+    for name in [f"Ndrive{d}" for d in range(1, len(placement.drive_node_ids) + 1)] + ["Nread"]:
+        lines += [f"*NODE PRINT, NSET={name}", "U"]
+    lines.append("*END STEP")
+    return lines
 
 
 def _terminal_node_ids(body: AssemblyBody, shell: ShellMesh, glue_nodes: np.ndarray) -> np.ndarray:
