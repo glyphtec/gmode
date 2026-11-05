@@ -17,17 +17,14 @@ print("=== Soundboard Lab smoke test: register ===")
 addon.register()
 
 assert hasattr(bpy.types.Object, "soundboard_lab"), "Object.soundboard_lab missing"
-assert "set_role_lining" in dir(bpy.ops.soundboard), "operator not registered"
 
 bpy.ops.mesh.primitive_cube_add()
 obj = bpy.context.active_object
 obj.soundboard_lab.role = 'SOUNDBOARD'
 assert obj.soundboard_lab.role == 'SOUNDBOARD'
 
-bpy.ops.object.select_all(action='SELECT')
-result = bpy.ops.soundboard.set_role_lining()
-assert result == {'FINISHED'}, f"operator returned {result}"
-assert obj.soundboard_lab.role == 'LINING', "set_role_lining did not set role"
+obj.soundboard_lab.role = 'LINING'
+assert obj.soundboard_lab.role == 'LINING'
 
 # Terminal condition defaults to Fixed; Spring exposes a stiffness field.
 assert obj.soundboard_lab.terminal_condition == 'FIXED'

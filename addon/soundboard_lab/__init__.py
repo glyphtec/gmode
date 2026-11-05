@@ -1,9 +1,8 @@
 """Soundboard Lab: Blender add-on entry point.
 
 This module is currently a smoke test of the extension hooks the add-on
-will use: N-panel tab + sub-panels, Object property storage, a
-right-click context menu entry and a keymap shortcut. No solver logic
-lives here (see docs/CLAUDE.md for the engine/UI boundary rule).
+will use: N-panel tab + sub-panels and Object property storage. No
+solver logic lives here (see docs/CLAUDE.md for the engine/UI boundary rule).
 """
 
 import math
@@ -282,21 +281,8 @@ def is_grain_orientable(obj):
 
 
 # ---------------------------------------------------------------------------
-# Operator (stub, used by both the context menu and the keymap below)
+# Operators
 # ---------------------------------------------------------------------------
-
-
-class SOUNDBOARD_OT_set_role_lining(bpy.types.Operator):
-    bl_idname = "soundboard.set_role_lining"
-    bl_label = "Set Role: Body / Lining"
-    bl_description = "Smoke-test stub: assign the Body / Lining role to selected objects"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        for obj in context.selected_objects:
-            obj.soundboard_lab.role = 'LINING'
-        self.report({'INFO'}, "Soundboard Lab: Set Role: Body / Lining (stub)")
-        return {'FINISHED'}
 
 
 class SOUNDBOARD_OT_align_grain_world(bpy.types.Operator):
@@ -518,7 +504,6 @@ class SOUNDBOARD_PT_bodies(bpy.types.Panel):
         if _draw_generated_notice(layout, obj):
             return
         layout.prop(obj.soundboard_lab, "role")
-        layout.operator(SOUNDBOARD_OT_set_role_lining.bl_idname, icon='MOD_SOFT')
 
 
 class SOUNDBOARD_PT_grain(bpy.types.Panel):
@@ -774,47 +759,12 @@ class SOUNDBOARD_PT_results(bpy.types.Panel):
 
 
 # ---------------------------------------------------------------------------
-# Right-click (Object) context menu entry
-# ---------------------------------------------------------------------------
-
-
-def draw_object_context_menu(self, context):
-    self.layout.separator()
-    self.layout.operator(SOUNDBOARD_OT_set_role_lining.bl_idname, icon='MOD_SOFT')
-
-
-# ---------------------------------------------------------------------------
-# Keymap
-# ---------------------------------------------------------------------------
-
-addon_keymaps = []
-
-
-def register_keymaps():
-    wm = bpy.context.window_manager
-    kc = wm.keyconfigs.addon
-    if kc:
-        km = kc.keymaps.new(name='Object Mode', space_type='EMPTY')
-        kmi = km.keymap_items.new(
-            SOUNDBOARD_OT_set_role_lining.bl_idname, 'V', 'PRESS', ctrl=True, shift=True
-        )
-        addon_keymaps.append((km, kmi))
-
-
-def unregister_keymaps():
-    for km, kmi in addon_keymaps:
-        km.keymap_items.remove(kmi)
-    addon_keymaps.clear()
-
-
-# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
 classes = (
     SoundboardLabObjectSettings,
     SoundboardLabMaterialSettings,
-    SOUNDBOARD_OT_set_role_lining,
     SOUNDBOARD_OT_align_grain_world,
     SOUNDBOARD_OT_align_grain_to_edge,
     SOUNDBOARD_PT_main,
@@ -841,14 +791,10 @@ def register():
         bpy.utils.register_class(SOUNDBOARD_GGT_grain_rosette)
     bpy.types.Object.soundboard_lab = bpy.props.PointerProperty(type=SoundboardLabObjectSettings)
     bpy.types.Material.soundboard_lab = bpy.props.PointerProperty(type=SoundboardLabMaterialSettings)
-    bpy.types.VIEW3D_MT_object_context_menu.append(draw_object_context_menu)
-    register_keymaps()
     print("Soundboard Lab: registered")
 
 
 def unregister():
-    unregister_keymaps()
-    bpy.types.VIEW3D_MT_object_context_menu.remove(draw_object_context_menu)
     del bpy.types.Material.soundboard_lab
     del bpy.types.Object.soundboard_lab
     if not bpy.app.background:
