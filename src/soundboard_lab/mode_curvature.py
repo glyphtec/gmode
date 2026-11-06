@@ -226,7 +226,7 @@ def sample_direction_ticks(
     strength = np.minimum(np.abs(k1) / scale, 1.0)
     keep = strength >= min_fraction
     centre = grid.points[keep]
-    half = (0.45 * grid.spacing * strength[keep])[:, None] * np.column_stack(
+    half = (0.57 * grid.spacing * strength[keep])[:, None] * np.column_stack(
         [np.cos(angle[keep]), np.sin(angle[keep])]
     )
     zc = grid.z[keep]
@@ -234,9 +234,10 @@ def sample_direction_ticks(
 
 
 def default_tick_spacing(xy: np.ndarray, triangles: np.ndarray) -> float:
-    """1.5 mean element edge lengths: dense enough to read the field,
-    sparse enough that ticks don't overlap."""
-    return 1.5 * float(np.sqrt(triangle_areas(xy, triangles).mean() * 2.0))
+    """1.75 mean element edge lengths: between the dense grid that made
+    short ticks hard to read and the sparse one that made long ticks
+    look heavy."""
+    return 1.75 * float(np.sqrt(triangle_areas(xy, triangles).mean() * 2.0))
 
 
 def build_mode_curvature(

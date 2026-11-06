@@ -772,6 +772,7 @@ class SOUNDBOARD_PT_results(bpy.types.Panel):
         layout.row().prop(scene, "soundboard_lab_mode_view", expand=True)
         if scene.soundboard_lab_mode_view == 'ENERGY':
             layout.prop(scene, "soundboard_lab_show_directions")
+            layout.prop(scene, "soundboard_lab_line_width")
             layout.label(text="Strain energy per area; contours at 20-100% of the scale", icon='INFO')
         else:
             layout.label(text="Select a mode to show its Z-displacement heat map", icon='INFO')

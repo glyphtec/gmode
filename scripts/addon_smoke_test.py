@@ -366,12 +366,26 @@ bpy.context.scene.soundboard_lab_mode_view = 'ENERGY'
 assert "ModeEnergy" in preview_obj.data.color_attributes
 contour_objs = [o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_CONTOURS']
 assert len(contour_objs) == 1, "energy view should build exactly one tagged iso-line object"
-assert len(contour_objs[0].data.edges) > 0 and len(contour_objs[0].data.polygons) == 0
+assert len(contour_objs[0].data.polygons) > 0 and contour_objs[0].show_in_front
+orange = tuple(contour_objs[0].data.color_attributes["OverlayColor"].data[0].color)
+assert orange[0] > 0.9 and 0.3 < orange[1] < 0.6 and orange[2] < 0.1, f"overlay must be orange, got {orange}"
 assert list(contour_objs[0].users_collection) == [results_coll]
 bpy.context.scene.soundboard_lab_selected_mode_index = 1
 assert len([o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_CONTOURS']) == 1
 direction_objs = [o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_DIRECTIONS']
-assert len(direction_objs) == 1 and len(direction_objs[0].data.edges) > 0, "energy view should draw bending ticks"
+assert len(direction_objs) == 1 and len(direction_objs[0].data.polygons) > 0, "energy view should draw bending ticks"
+# Ribbon geometry: a 10 mm segment at width 2 spans y = +-1 and, with the ends extended by half the width, x = -1..11.
+ribbon_vertices, ribbon_quads = addon.analysis._ribbon_geometry([[0.0, 0.0, 0.0, 10.0, 0.0, 0.0]], 2.0)
+assert len(ribbon_quads) == 1
+assert sorted({round(v[1], 6) for v in ribbon_vertices}) == [-1.0, 1.0]
+assert (min(v[0] for v in ribbon_vertices), max(v[0] for v in ribbon_vertices)) == (-1.0, 11.0)
+def _extent_y(obj):
+    ys = [v.co.y for v in obj.data.vertices]
+    return max(ys) - min(ys)
+narrow = _extent_y(direction_objs[0])
+bpy.context.scene.soundboard_lab_line_width = 4.0
+assert _extent_y(direction_objs[0]) > narrow, "a wider Line Width must widen the ribbons"
+bpy.context.scene.soundboard_lab_line_width = 0.9
 assert set(result["mode_curvature"]) == set(result["mode_shapes"])
 bpy.context.scene.soundboard_lab_show_directions = False
 assert not [o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_DIRECTIONS']

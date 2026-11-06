@@ -15,6 +15,7 @@ needs bpy.app.timers, and that wrapper is intentionally minimal.
 """
 
 import json
+import math
 import subprocess
 import tempfile
 from pathlib import Path
@@ -691,26 +692,57 @@ def _color_signed_displacement(color_attr, z_displacement: list) -> None:
         color_attr.data[i].color = (r, g, b, 1.0)
 
 
-# Contour lines sit this far above the preview surface so they aren't
-# lost to depth-buffer ties with it (they are lines, not a second surface).
-_CONTOUR_LIFT_MM = 0.2
+# The iso-lines and bending ticks are flat ribbons, not mesh edges: a loose
+# edge is always 1 px and drawn in Blender's wire color, with no way to
+# change either. Ribbons take a width in mm and a vertex color, and
+# "show in front" keeps them from z-fighting with the preview surface
+# they lie on (which depth-buffer precision makes unavoidable at a
+# distance for any fixed offset).
+_OVERLAY_ORANGE = (1.0, 0.45, 0.0, 1.0)
+_OVERLAY_LIFT_MM = 0.2
+_OVERLAY_COLOR_ATTRIBUTE = "OverlayColor"
+
+
+def _ribbon_geometry(segments: list, width_mm: float) -> tuple[list, list]:
+    """`(vertices, quads)` of one flat `width_mm`-wide ribbon per
+    `[x0, y0, z0, x1, y1, z1]` segment, wound counter-clockwise seen
+    from +Z. Each end is extended by half the width so consecutive
+    segments of a polyline overlap at their corners instead of leaving
+    wedge-shaped gaps."""
+    half = 0.5 * width_mm
+    vertices = []
+    quads = []
+    for x0, y0, z0, x1, y1, z1 in segments:
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            continue
+        ux, uy = dx / length, dy / length
+        nx, ny = -uy * half, ux * half
+        ex, ey = ux * half, uy * half
+        z0 += _OVERLAY_LIFT_MM
+        z1 += _OVERLAY_LIFT_MM
+        base = len(vertices)
+        vertices += [
+            (x0 - ex + nx, y0 - ey + ny, z0),
+            (x0 - ex - nx, y0 - ey - ny, z0),
+            (x1 + ex - nx, y1 + ey - ny, z1),
+            (x1 + ex + nx, y1 + ey + ny, z1),
+        ]
+        quads.append((base, base + 1, base + 2, base + 3))
+    return vertices, quads
 
 
 def _build_segment_object(
-    context, name: str, kind: str, segments: list, source: bpy.types.Object | None
+    context, name: str, kind: str, segments: list, width_mm: float, source: bpy.types.Object | None
 ) -> bpy.types.Object:
-    """Build (or replace) an add-on-owned object of loose edges, one per
-    `[x0, y0, z0, x1, y1, z1]` segment, tagged `kind` in the "Analysis
-    Results" generated collection."""
+    """Build (or replace) an add-on-owned orange ribbon object, one
+    ribbon per `[x0, y0, z0, x1, y1, z1]` segment, tagged `kind` in the
+    "Analysis Results" generated collection."""
     from . import generated
 
     _root, _bonding, results_collection = generated.ensure_generated_collections(context.scene)
-    vertices = []
-    edges = []
-    for x0, y0, z0, x1, y1, z1 in segments:
-        edges.append((len(vertices), len(vertices) + 1))
-        vertices.append((x0, y0, z0 + _CONTOUR_LIFT_MM))
-        vertices.append((x1, y1, z1 + _CONTOUR_LIFT_MM))
+    vertices, quads = _ribbon_geometry(segments, width_mm)
 
     obj = next((o for o in context.scene.objects if o.soundboard_lab.generated_kind == kind), None)
     if obj is not None and obj.type == 'MESH':
@@ -718,36 +750,43 @@ def _build_segment_object(
         mesh.clear_geometry()
     else:
         mesh = bpy.data.meshes.new(name)
-    mesh.from_pydata(vertices, edges, [])
+    mesh.from_pydata(vertices, [], quads)
     mesh.update()
+
+    if _OVERLAY_COLOR_ATTRIBUTE in mesh.color_attributes:
+        mesh.color_attributes.remove(mesh.color_attributes[_OVERLAY_COLOR_ATTRIBUTE])
+    color_attr = mesh.color_attributes.new(name=_OVERLAY_COLOR_ATTRIBUTE, type='FLOAT_COLOR', domain='POINT')
+    color_attr.data.foreach_set("color", list(_OVERLAY_ORANGE) * len(vertices))
 
     if obj is None:
         obj = bpy.data.objects.new(name, mesh)
         results_collection.objects.link(obj)
         obj.soundboard_lab.generated_kind = kind
         obj.hide_render = True
+    obj.show_in_front = True
     generated.link_exclusively(obj, results_collection)
     obj.soundboard_lab.source_object = source
     return obj
 
 
 def build_mode_energy_contours(
-    context, name: str, contours: list[dict], source: bpy.types.Object | None = None
+    context, name: str, contours: list[dict], width_mm: float, source: bpy.types.Object | None = None
 ) -> bpy.types.Object:
     """The strain-energy iso-line object, from the per-level segments of
     `mode_energy.build_mode_energy`."""
     return _build_segment_object(
-        context, name, 'MODE_CONTOURS', [seg for contour in contours for seg in contour["segments"]], source
+        context, name, 'MODE_CONTOURS', [seg for contour in contours for seg in contour["segments"]], width_mm,
+        source,
     )
 
 
 def build_mode_bend_directions(
-    context, name: str, ticks: list, source: bpy.types.Object | None = None
+    context, name: str, ticks: list, width_mm: float, source: bpy.types.Object | None = None
 ) -> bpy.types.Object:
-    """The bending-direction object: short ticks along the principal
-    bending axis (the best rib direction), longer where the curvature
-    is stronger -- from `mode_curvature.build_mode_curvature`."""
-    return _build_segment_object(context, name, 'MODE_DIRECTIONS', ticks, source)
+    """The bending-direction object: ticks along the principal bending
+    axis (the best rib direction), longer where the curvature is
+    stronger -- from `mode_curvature.build_mode_curvature`."""
+    return _build_segment_object(context, name, 'MODE_DIRECTIONS', ticks, width_mm, source)
 
 
 # ---------------------------------------------------------------------------
@@ -943,9 +982,10 @@ def _update_mode_shape_preview(scene) -> None:
         source=soundboard_obj,
         energy_scale=energy["display_scale"] if energy is not None else None,
     )
+    width_mm = scene.soundboard_lab_line_width
     if energy is not None:
         build_mode_energy_contours(
-            bpy.context, "Soundboard Mode Energy Contours", energy["contours"], source=soundboard_obj
+            bpy.context, "Soundboard Mode Energy Contours", energy["contours"], width_mm, source=soundboard_obj
         )
     else:
         from . import generated
@@ -954,7 +994,7 @@ def _update_mode_shape_preview(scene) -> None:
     curvature = (_last_mode_curvature or {}).get(mode_key)
     if energy is not None and curvature is not None and scene.soundboard_lab_show_directions:
         build_mode_bend_directions(
-            bpy.context, "Soundboard Mode Bending Directions", curvature["ticks"], source=soundboard_obj
+            bpy.context, "Soundboard Mode Bending Directions", curvature["ticks"], width_mm, source=soundboard_obj
         )
     else:
         from . import generated
@@ -1128,6 +1168,14 @@ def register():
         default=True,
         update=_on_mode_view_update,
     )
+    bpy.types.Scene.soundboard_lab_line_width = bpy.props.FloatProperty(
+        name="Line Width",
+        description="Width of the iso-energy contour lines and bending ticks, in mm on the soundboard",
+        default=0.9,
+        min=0.2,
+        max=8.0,
+        update=_on_mode_view_update,
+    )
     bpy.types.Scene.soundboard_lab_status = bpy.props.EnumProperty(
         items=[
             ('IDLE', "Idle", "No analysis run yet"),
@@ -1174,6 +1222,7 @@ def unregister():
     del bpy.types.Scene.soundboard_lab_n_frequencies
     del bpy.types.Scene.soundboard_lab_message
     del bpy.types.Scene.soundboard_lab_status
+    del bpy.types.Scene.soundboard_lab_line_width
     del bpy.types.Scene.soundboard_lab_show_directions
     del bpy.types.Scene.soundboard_lab_mode_view
     del bpy.types.Scene.soundboard_lab_selected_mode_index
