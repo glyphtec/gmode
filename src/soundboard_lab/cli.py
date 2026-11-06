@@ -49,6 +49,7 @@ from soundboard_lab.materials import (
 )
 from soundboard_lab.mesh import mesh_surface, write_frequency_inp_orthotropic
 from soundboard_lab.mobility import KGF_TO_N, evaluate_bridge_mobility
+from soundboard_lab.mode_curvature import build_mode_curvature, default_tick_spacing, make_tick_grid
 from soundboard_lab.mode_energy import build_mode_energy
 from soundboard_lab.repair import MeshRepairError, repair_stl
 from soundboard_lab.shell_mesh import mode_shape_z_displacement, shell_from_closed_mesh, write_shell_frequency_inp
@@ -353,6 +354,24 @@ def run_shell_analysis(
             )
             if energy_map is not None:
                 mode_energy[str(m.mode_number)] = energy_map
+        tick_grid = make_tick_grid(
+            shell.xy, shell.top_z, shell.triangles, default_tick_spacing(shell.xy, shell.triangles)
+        )
+        mode_curvature = {
+            str(m.mode_number): build_mode_curvature(
+                shell.xy,
+                shell.triangles,
+                thickness,
+                write_result.top_layer_node_ids,
+                write_result.top_mid_node_ids,
+                mode_displacements[m.mode_number],
+                material,
+                orientation,
+                tick_grid,
+                reference_energy=(mode_energy.get(str(m.mode_number)) or {}).get("total_energy"),
+            )
+            for m in modes
+        }
         mobility = None
         if bridge_probe is not None:
             mobility = evaluate_bridge_mobility(
@@ -386,6 +405,7 @@ def run_shell_analysis(
         },
         "mode_shapes": mode_shapes,
         "mode_energy": mode_energy,
+        "mode_curvature": mode_curvature,
         "bonded_bodies": [
             {
                 "name": name,

@@ -165,6 +165,13 @@ def test_cli_shell_path_success(ccx_path, tmp_path):
         assert energy["display_scale"] > 0.0
         assert all(len(seg) == 6 for c in energy["contours"] for seg in c["segments"])
 
+    mode_curvature = result["mode_curvature"]
+    assert set(mode_curvature.keys()) == {"1", "2", "3", "4"}
+    for curvature in mode_curvature.values():
+        assert len(curvature["hessian"]) == n_vertices
+        assert 0.90 < curvature["plate_energy_ratio"] < 1.02
+        assert len(curvature["ticks"]) > 0
+
 
 def test_cli_shell_path_custom_material_json_actually_used(ccx_path, tmp_path):
     """`--material-json` must actually flow through to the solved

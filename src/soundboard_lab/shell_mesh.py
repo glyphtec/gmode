@@ -555,6 +555,9 @@ class ShellInpWriteResult:
     # footprint for a mode-shape visualization.
     corner_node_ids: np.ndarray  # (num_layers + 1, V): the same, at every extrusion level (row -1 is
     # `top_layer_node_ids`) -- for integrating a per-node field through the thickness.
+    top_mid_node_ids: np.ndarray  # (T, 3): top-surface mid-edge node of each triangle's edges
+    # (v1-v2, v2-v3, v3-v1) -- with the corners, the six nodes of the quadratic top-surface
+    # triangle the solver's own displacement field lives on (see mode_curvature.py).
 
 
 def mode_shape_z_displacement(
@@ -682,5 +685,6 @@ def write_shell_frequency_inp(
         element_count=len(elements),
         top_layer_node_ids=corner_node_ids[num_layers, :].copy(),
         corner_node_ids=corner_node_ids.copy(),
+        top_mid_node_ids=elements[-len(shell.triangles) :, 9:12].copy(),
     )
 

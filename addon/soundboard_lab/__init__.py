@@ -140,6 +140,7 @@ class SoundboardLabObjectSettings(bpy.types.PropertyGroup):
             ('SOUNDBOARD_PROXY', "Soundboard Proxy", "Solver-meshed soundboard surface used as the bond reference"),
             ('MODE_SHAPE', "Mode Shape", "Mode-shape result display"),
             ('MODE_CONTOURS', "Mode Energy Contours", "Strain-energy iso-lines over the mode-shape display"),
+            ('MODE_DIRECTIONS', "Mode Bending Directions", "Principal bending-axis ticks over the mode-shape display"),
         ],
         default='NONE',
     )
@@ -770,6 +771,7 @@ class SOUNDBOARD_PT_results(bpy.types.Panel):
         )
         layout.row().prop(scene, "soundboard_lab_mode_view", expand=True)
         if scene.soundboard_lab_mode_view == 'ENERGY':
+            layout.prop(scene, "soundboard_lab_show_directions")
             layout.label(text="Strain energy per area; contours at 20-100% of the scale", icon='INFO')
         else:
             layout.label(text="Select a mode to show its Z-displacement heat map", icon='INFO')

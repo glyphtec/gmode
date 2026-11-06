@@ -370,8 +370,15 @@ assert len(contour_objs[0].data.edges) > 0 and len(contour_objs[0].data.polygons
 assert list(contour_objs[0].users_collection) == [results_coll]
 bpy.context.scene.soundboard_lab_selected_mode_index = 1
 assert len([o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_CONTOURS']) == 1
+direction_objs = [o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_DIRECTIONS']
+assert len(direction_objs) == 1 and len(direction_objs[0].data.edges) > 0, "energy view should draw bending ticks"
+assert set(result["mode_curvature"]) == set(result["mode_shapes"])
+bpy.context.scene.soundboard_lab_show_directions = False
+assert not [o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_DIRECTIONS']
+bpy.context.scene.soundboard_lab_show_directions = True
+assert len([o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_DIRECTIONS']) == 1
 bpy.context.scene.soundboard_lab_mode_view = 'DISPLACEMENT'
-assert not [o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_CONTOURS']
+assert not [o for o in bpy.data.objects if o.soundboard_lab.generated_kind in ('MODE_CONTOURS', 'MODE_DIRECTIONS')]
 assert "ModeShapeZ" in preview_obj.data.color_attributes
 print("Strain energy view / iso-line check passed")
 

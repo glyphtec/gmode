@@ -696,28 +696,23 @@ def _color_signed_displacement(color_attr, z_displacement: list) -> None:
 _CONTOUR_LIFT_MM = 0.2
 
 
-def build_mode_energy_contours(
-    context, name: str, contours: list[dict], source: bpy.types.Object | None = None
+def _build_segment_object(
+    context, name: str, kind: str, segments: list, source: bpy.types.Object | None
 ) -> bpy.types.Object:
-    """Build (or replace) the strain-energy iso-line object: loose
-    edges, one per contour segment (`[x0, y0, z0, x1, y1, z1]`, see
-    `mode_energy.build_mode_energy`), in the "Analysis Results"
-    generated collection."""
+    """Build (or replace) an add-on-owned object of loose edges, one per
+    `[x0, y0, z0, x1, y1, z1]` segment, tagged `kind` in the "Analysis
+    Results" generated collection."""
     from . import generated
 
     _root, _bonding, results_collection = generated.ensure_generated_collections(context.scene)
     vertices = []
     edges = []
-    for contour in contours:
-        for x0, y0, z0, x1, y1, z1 in contour["segments"]:
-            edges.append((len(vertices), len(vertices) + 1))
-            vertices.append((x0, y0, z0 + _CONTOUR_LIFT_MM))
-            vertices.append((x1, y1, z1 + _CONTOUR_LIFT_MM))
+    for x0, y0, z0, x1, y1, z1 in segments:
+        edges.append((len(vertices), len(vertices) + 1))
+        vertices.append((x0, y0, z0 + _CONTOUR_LIFT_MM))
+        vertices.append((x1, y1, z1 + _CONTOUR_LIFT_MM))
 
-    obj = next(
-        (o for o in context.scene.objects if o.soundboard_lab.generated_kind == 'MODE_CONTOURS'),
-        None,
-    )
+    obj = next((o for o in context.scene.objects if o.soundboard_lab.generated_kind == kind), None)
     if obj is not None and obj.type == 'MESH':
         mesh = obj.data
         mesh.clear_geometry()
@@ -729,11 +724,30 @@ def build_mode_energy_contours(
     if obj is None:
         obj = bpy.data.objects.new(name, mesh)
         results_collection.objects.link(obj)
-        obj.soundboard_lab.generated_kind = 'MODE_CONTOURS'
+        obj.soundboard_lab.generated_kind = kind
         obj.hide_render = True
     generated.link_exclusively(obj, results_collection)
     obj.soundboard_lab.source_object = source
     return obj
+
+
+def build_mode_energy_contours(
+    context, name: str, contours: list[dict], source: bpy.types.Object | None = None
+) -> bpy.types.Object:
+    """The strain-energy iso-line object, from the per-level segments of
+    `mode_energy.build_mode_energy`."""
+    return _build_segment_object(
+        context, name, 'MODE_CONTOURS', [seg for contour in contours for seg in contour["segments"]], source
+    )
+
+
+def build_mode_bend_directions(
+    context, name: str, ticks: list, source: bpy.types.Object | None = None
+) -> bpy.types.Object:
+    """The bending-direction object: short ticks along the principal
+    bending axis (the best rib direction), longer where the curvature
+    is stronger -- from `mode_curvature.build_mode_curvature`."""
+    return _build_segment_object(context, name, 'MODE_DIRECTIONS', ticks, source)
 
 
 # ---------------------------------------------------------------------------
@@ -805,6 +819,7 @@ _active_handle = None
 _last_mesh_shape = None
 _last_mode_shapes = None
 _last_mode_energy = None
+_last_mode_curvature = None
 
 
 def _update_step_status(scene, status: dict) -> None:
@@ -822,7 +837,7 @@ def _update_step_status(scene, status: dict) -> None:
 
 
 def _apply_result(scene, result: dict) -> None:
-    global _last_mesh_shape, _last_mode_shapes, _last_mode_energy
+    global _last_mesh_shape, _last_mode_shapes, _last_mode_energy, _last_mode_curvature
     scene.soundboard_lab_results.clear()
     scene.soundboard_lab_mobility.available = False
     if result["status"] == "ok":
@@ -862,6 +877,7 @@ def _apply_result(scene, result: dict) -> None:
         _last_mesh_shape = result.get("mesh_shape")
         _last_mode_shapes = result.get("mode_shapes")
         _last_mode_energy = result.get("mode_energy")
+        _last_mode_curvature = result.get("mode_curvature")
         scene.soundboard_lab_selected_mode_index = 0
     else:
         scene.soundboard_lab_status = 'ERROR'
@@ -869,6 +885,7 @@ def _apply_result(scene, result: dict) -> None:
         _last_mesh_shape = None
         _last_mode_shapes = None
         _last_mode_energy = None
+        _last_mode_curvature = None
 
 
 def _poll_timer():
@@ -934,6 +951,15 @@ def _update_mode_shape_preview(scene) -> None:
         from . import generated
 
         generated.remove_generated_objects(scene, {'MODE_CONTOURS'})
+    curvature = (_last_mode_curvature or {}).get(mode_key)
+    if energy is not None and curvature is not None and scene.soundboard_lab_show_directions:
+        build_mode_bend_directions(
+            bpy.context, "Soundboard Mode Bending Directions", curvature["ticks"], source=soundboard_obj
+        )
+    else:
+        from . import generated
+
+        generated.remove_generated_objects(scene, {'MODE_DIRECTIONS'})
     if soundboard_obj is not None:
         _set_soundboard_visibility(soundboard_obj, visible=False)
 
@@ -1093,6 +1119,15 @@ def register():
         default='DISPLACEMENT',
         update=_on_mode_view_update,
     )
+    bpy.types.Scene.soundboard_lab_show_directions = bpy.props.BoolProperty(
+        name="Rib Directions",
+        description=(
+            "In the Strain Energy view, draw short ticks along each point's principal bending axis -- the "
+            "direction a rib would have to run to resist the mode's curvature, longer where it bends more"
+        ),
+        default=True,
+        update=_on_mode_view_update,
+    )
     bpy.types.Scene.soundboard_lab_status = bpy.props.EnumProperty(
         items=[
             ('IDLE', "Idle", "No analysis run yet"),
@@ -1129,15 +1164,17 @@ def register():
 
 
 def unregister():
-    global _active_handle, _last_mesh_shape, _last_mode_shapes, _last_mode_energy
+    global _active_handle, _last_mesh_shape, _last_mode_shapes, _last_mode_energy, _last_mode_curvature
     _active_handle = None
     _last_mesh_shape = None
     _last_mode_shapes = None
     _last_mode_energy = None
+    _last_mode_curvature = None
     del bpy.types.Scene.soundboard_lab_boundary_condition
     del bpy.types.Scene.soundboard_lab_n_frequencies
     del bpy.types.Scene.soundboard_lab_message
     del bpy.types.Scene.soundboard_lab_status
+    del bpy.types.Scene.soundboard_lab_show_directions
     del bpy.types.Scene.soundboard_lab_mode_view
     del bpy.types.Scene.soundboard_lab_selected_mode_index
     del bpy.types.Scene.soundboard_lab_compute_mm
