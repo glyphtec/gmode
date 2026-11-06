@@ -35,6 +35,7 @@ class SoundboardLabObjectSettings(bpy.types.PropertyGroup):
             ('LINING', "Body / Lining", "Rim lining body, bonded to the soundboard at the glue strip"),
             ('POINT_ATTACHMENT', "Point Attachment", "Bridge feet / compensator point"),
             ('MASS_LOAD', "Mass Load", "Added mass"),
+            ('MM_DRIVE', "MM Drive Point", "Bridge drive/read point for the monopole mobility measurement (adds no stiffness or mass)"),
         ],
         default='NONE',
     )
@@ -81,7 +82,7 @@ class SoundboardLabObjectSettings(bpy.types.PropertyGroup):
         name="Patch Radius (mm)",
         description=(
             "Nodes within this radius of the object origin's nearest body surface share the "
-            "spring/mass; 0 = the single nearest node"
+            "spring/mass/drive load; 0 = the single nearest node"
         ),
         default=5.0,
         min=0.0,
@@ -706,6 +707,17 @@ class SOUNDBOARD_PT_analysis(bpy.types.Panel):
 
         layout.prop(context.scene, "soundboard_lab_n_frequencies")
 
+        layout.prop(context.scene, "soundboard_lab_compute_mm")
+        if context.scene.soundboard_lab_compute_mm:
+            count = len(analysis.find_mm_drive_objects(context))
+            if count == 0:
+                layout.label(text="Add an Empty at the bridge with the MM Drive Point role", icon='ERROR')
+            else:
+                layout.label(text=f"{count} MM Drive Point(s); needs a held rim (not Free)")
+            if obj is not None and obj.soundboard_lab.role == 'MM_DRIVE':
+                layout.prop(obj.soundboard_lab, "attach_radius")
+                layout.label(text="Load applied and deflection read at the origin, snapped to the surface")
+
         layout.operator(analysis.SOUNDBOARD_OT_analyze.bl_idname, icon='PLAY', text="GO!")
         status = context.scene.soundboard_lab_status
         if status == 'RUNNING':
@@ -756,6 +768,16 @@ class SOUNDBOARD_PT_results(bpy.types.Panel):
             scene, "soundboard_lab_selected_mode_index",
         )
         layout.label(text="Select a mode to show its Z-displacement heat map", icon='INFO')
+
+        mobility = scene.soundboard_lab_mobility
+        if mobility.available:
+            box = layout.box()
+            box.label(text=f"Monopole Mobility (M1 = {mobility.m1_frequency_hz:.4g} Hz)")
+            box.label(text=f"Stiffness (K): {mobility.stiffness_kgf_per_mm:.4g} kgf/mm")
+            box.label(text=f"Effective Mass (M): {mobility.effective_mass_g:.4g} g")
+            box.label(
+                text=f"MM: {mobility.mobility_m_per_s_per_n:.4g} ({mobility.mobility_m_per_s_per_n * 1000:.4g})"
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -193,6 +193,44 @@ def gather_point_attachments(context) -> list[dict]:
     return entries
 
 
+def find_mm_drive_objects(context) -> list[bpy.types.Object]:
+    """MM Drive Point objects of any type (typically Empties); each acts
+    at its world-space origin."""
+    return [
+        obj for obj in context.scene.objects
+        if obj.soundboard_lab.role == 'MM_DRIVE'
+        and obj.soundboard_lab.generated_kind == 'NONE'
+    ]
+
+
+def gather_mobility_spec(context) -> dict:
+    """Engine `--mobility-json` content for the static bridge monopole
+    mobility solve: one drive point per MM Drive object (several share
+    the load equally; the read point is their centroid, i.e. the drive
+    point itself when there is one). Raises `SoundboardLabSceneError`
+    if there is none or the rim is not held."""
+    objects = find_mm_drive_objects(context)
+    if not objects:
+        raise SoundboardLabSceneError(
+            "Compute Monopole Mobility is on, but no object has the 'MM Drive Point' role -- "
+            "place an Empty at the bridge and give it that role"
+        )
+    if context.scene.soundboard_lab_boundary_condition == 'FREE_FREE':
+        raise SoundboardLabSceneError(
+            "Monopole mobility needs a held rim: use Fixed Edge or Body/Lining (not Free)"
+        )
+    return {
+        "drive_points": [
+            {
+                "name": obj.name,
+                "position": list(obj.matrix_world.translation),
+                "radius": obj.soundboard_lab.attach_radius,
+            }
+            for obj in objects
+        ]
+    }
+
+
 def find_soundboard_object(context) -> bpy.types.Object:
     candidates = find_role_objects(context, 'SOUNDBOARD')
     if not candidates:
@@ -310,6 +348,7 @@ def start_solve(
     bonded_bodies: list[dict] | None = None,
     tie_tolerance: float = 0.1,
     attachments: list[dict] | None = None,
+    mobility: dict | None = None,
 ) -> dict:
     """Export `obj` and launch the engine CLI subprocess. Returns a
     handle dict for `poll_solve`. Raises `FileNotFoundError` for
@@ -349,6 +388,9 @@ def start_solve(
 
     `attachments` (see `gather_point_attachments`) become grounded Z
     springs / lumped masses via `--attachments-json`.
+
+    `mobility` (see `gather_mobility_spec`) adds the static bridge
+    monopole mobility solve via `--mobility-json`.
     """
     if not ccx_path or not Path(ccx_path).is_file():
         raise FileNotFoundError("ccx executable path is not configured or does not exist (add-on preferences)")
@@ -412,6 +454,10 @@ def start_solve(
         attachments_json_path = work_dir / "attachments.json"
         attachments_json_path.write_text(json.dumps({"attachments": attachments}, indent=2))
         cmd += ["--attachments-json", str(attachments_json_path)]
+    if mobility:
+        mobility_json_path = work_dir / "mobility.json"
+        mobility_json_path.write_text(json.dumps(mobility, indent=2))
+        cmd += ["--mobility-json", str(mobility_json_path)]
 
     process =  subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return {
@@ -639,6 +685,19 @@ class SoundboardLabModeResult(bpy.types.PropertyGroup):
     frequency_hz: bpy.props.FloatProperty(name="Frequency (Hz)")
 
 
+class SoundboardLabMobilityResult(bpy.types.PropertyGroup):
+    """The M1 monopole-mobility figures from the last solve (Scene-level,
+    so they are saved with the .blend). `available` is False when the
+    last solve did not compute MM."""
+
+    available: bpy.props.BoolProperty(default=False)
+    stiffness_kgf_per_mm: bpy.props.FloatProperty(name="Stiffness (K)")
+    effective_mass_g: bpy.props.FloatProperty(name="Effective Mass (M)")
+    mobility_m_per_s_per_n: bpy.props.FloatProperty(name="Monopole Mobility")
+    m1_mode: bpy.props.IntProperty(name="M1 Mode")
+    m1_frequency_hz: bpy.props.FloatProperty(name="M1 Frequency (Hz)")
+
+
 class SoundboardLabStepStatus(bpy.types.PropertyGroup):
     """One row of the process-step checklist (see cli.py's
     `StepTracker`) -- not a numeric progress bar, since ccx itself is
@@ -703,6 +762,7 @@ def _update_step_status(scene, status: dict) -> None:
 def _apply_result(scene, result: dict) -> None:
     global _last_mesh_shape, _last_mode_shapes
     scene.soundboard_lab_results.clear()
+    scene.soundboard_lab_mobility.available = False
     if result["status"] == "ok":
         scene.soundboard_lab_status = 'DONE'
         message = f"{result['triangle_count']} triangles, {result['material_name']}"
@@ -723,6 +783,15 @@ def _apply_result(scene, result: dict) -> None:
                 f" | {placed['name']} on {placed['body']} ({placed['nodes']} nodes, "
                 f"{placed['snap_distance']:.2f} mm snap)"
             )
+        mobility = result.get("bridge_mobility")
+        if mobility is not None:
+            stored = scene.soundboard_lab_mobility
+            stored.stiffness_kgf_per_mm = mobility["stiffness_kgf_per_mm"]
+            stored.effective_mass_g = mobility["effective_mass_g"]
+            stored.mobility_m_per_s_per_n = mobility["mobility_m_per_s_per_n"]
+            stored.m1_mode = mobility["m1_mode"]
+            stored.m1_frequency_hz = mobility["m1_frequency_hz"]
+            stored.available = True
         scene.soundboard_lab_message = message
         for mode in result["modes"]:
             item = scene.soundboard_lab_results.add()
@@ -875,6 +944,7 @@ class SOUNDBOARD_OT_analyze(bpy.types.Operator):
                 bonded_bodies=bonded_bodies,
                 tie_tolerance=scene.soundboard_lab_bond_tolerance,
                 attachments=gather_point_attachments(context),
+                mobility=gather_mobility_spec(context) if scene.soundboard_lab_compute_mm else None,
             )
         except (SoundboardLabSceneError, FileNotFoundError) as exc:
             self.report({'ERROR'}, str(exc))
@@ -899,6 +969,7 @@ class SOUNDBOARD_OT_analyze(bpy.types.Operator):
 classes = (
     SoundboardLabPreferences,
     SoundboardLabModeResult,
+    SoundboardLabMobilityResult,
     SoundboardLabStepStatus,
     SOUNDBOARD_OT_analyze,
 )
@@ -918,6 +989,15 @@ def register():
         bpy.app.timers.register(_restore_prefs_from_cache_if_empty, first_interval=0.2)
     bpy.types.Scene.soundboard_lab_results = bpy.props.CollectionProperty(type=SoundboardLabModeResult)
     bpy.types.Scene.soundboard_lab_steps = bpy.props.CollectionProperty(type=SoundboardLabStepStatus)
+    bpy.types.Scene.soundboard_lab_mobility = bpy.props.PointerProperty(type=SoundboardLabMobilityResult)
+    bpy.types.Scene.soundboard_lab_compute_mm = bpy.props.BoolProperty(
+        name="Compute Monopole Mobility",
+        description=(
+            "Also run the static bridge solve and report the M1 stiffness, effective mass and "
+            "monopole mobility; needs an MM Drive Point empty at the bridge and a held rim"
+        ),
+        default=False,
+    )
     bpy.types.Scene.soundboard_lab_selected_mode_index = bpy.props.IntProperty(
         name="Selected Mode", default=0, update=_on_selected_mode_index_update
     )
@@ -966,6 +1046,8 @@ def unregister():
     del bpy.types.Scene.soundboard_lab_message
     del bpy.types.Scene.soundboard_lab_status
     del bpy.types.Scene.soundboard_lab_selected_mode_index
+    del bpy.types.Scene.soundboard_lab_compute_mm
+    del bpy.types.Scene.soundboard_lab_mobility
     del bpy.types.Scene.soundboard_lab_steps
     del bpy.types.Scene.soundboard_lab_results
     for cls in reversed(classes):

@@ -583,6 +583,29 @@ attachments = {a["name"]: a for a in addon.analysis.gather_point_attachments(bpy
 assert abs(attachments["Compensator"]["stiffness"] - 2.72 * 9.80665) < 1e-4, attachments  # float32 property
 assert attachments["BridgeMass"]["stiffness"] == 0.0, attachments
 assert addon.bonds.gather_bonded_bodies(bpy.context) == (bonded, excluded), "Empties are never bodies"
+
+# MM Drive Point: not an attachment, needs a held rim, and one is required.
+try:
+    addon.analysis.gather_mobility_spec(bpy.context)
+    raise AssertionError("MM without an MM Drive Point must be rejected")
+except addon.analysis.SoundboardLabSceneError as exc:
+    assert "MM Drive Point" in str(exc), exc
+mm_drive = bpy.data.objects.new("MMDrive", None)
+mm_drive.location = bridge_mass.location
+scene.collection.objects.link(mm_drive)
+mm_drive.soundboard_lab.role = 'MM_DRIVE'
+bpy.context.view_layer.update()
+assert {o.name for o in addon.analysis.find_attachment_objects(bpy.context)} == {"Compensator", "BridgeMass"}
+assert [o.name for o in addon.analysis.find_mm_drive_objects(bpy.context)] == ["MMDrive"]
+scene.soundboard_lab_boundary_condition = 'FREE_FREE'
+try:
+    addon.analysis.gather_mobility_spec(bpy.context)
+    raise AssertionError("MM on a free rim must be rejected")
+except addon.analysis.SoundboardLabSceneError as exc:
+    assert "held rim" in str(exc), exc
+scene.soundboard_lab_boundary_condition = 'FIXED_EDGE'
+mobility_spec = addon.analysis.gather_mobility_spec(bpy.context)
+assert [d["name"] for d in mobility_spec["drive_points"]] == ["MMDrive"], mobility_spec
 assembly_handle = addon.analysis.start_solve(
     bpy.context,
     bond_objs["soundboard"],
@@ -596,6 +619,7 @@ assembly_handle = addon.analysis.start_solve(
     ],
     tie_tolerance=scene.soundboard_lab_bond_tolerance,
     attachments=list(attachments.values()),
+    mobility=mobility_spec,
 )
 assembly_result = None
 for _ in range(1200):  # up to ~10 minutes
@@ -614,8 +638,16 @@ placed = {p["name"]: p for p in assembly_result["point_attachments"]}
 assert placed["Compensator"]["body"] == bond_objs["rib1"].name, placed
 assert placed["BridgeMass"]["body"] == "Soundboard" and placed["BridgeMass"]["nodes"] >= 1, placed
 assert "Compensator on " in scene.soundboard_lab_message, scene.soundboard_lab_message
-for empty in (compensator, bridge_mass):
+for empty in (compensator, bridge_mass, mm_drive):
     bpy.data.objects.remove(empty, do_unlink=True)
+mm = assembly_result["bridge_mobility"]
+stored_mm = scene.soundboard_lab_mobility
+assert stored_mm.available and stored_mm.m1_mode == mm["m1_mode"], "MM result not stored on the scene"
+assert abs(stored_mm.mobility_m_per_s_per_n - mm["mobility_m_per_s_per_n"]) < 1e-6 * mm["mobility_m_per_s_per_n"]
+assert stored_mm.stiffness_kgf_per_mm > 0 and stored_mm.effective_mass_g > 0 and stored_mm.mobility_m_per_s_per_n > 0
+addon.analysis._apply_result(scene, {**assembly_result, "bridge_mobility": None})
+assert not scene.soundboard_lab_mobility.available, "a solve without MM must clear the stored MM"
+print("Monopole mobility passed:", {k: mm[k] for k in ("stiffness_kgf_per_mm", "effective_mass_g", "mobility_m_per_s_per_n", "m1_mode")})
 print("Point attachments passed:", placed)
 print("Assembly solve passed: ties", tied, "f1 =", assembly_result["modes"][0]["frequency_hz"])
 scene.soundboard_lab_results.clear()
