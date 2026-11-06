@@ -158,6 +158,13 @@ def test_cli_shell_path_success(ccx_path, tmp_path):
     for dz in mode_shapes.values():
         assert len(dz) == n_vertices
 
+    mode_energy = result["mode_energy"]
+    assert set(mode_energy.keys()) == {"1", "2", "3", "4"}
+    for energy in mode_energy.values():
+        assert len(energy["energy_per_area"]) == n_vertices
+        assert energy["display_scale"] > 0.0
+        assert all(len(seg) == 6 for c in energy["contours"] for seg in c["segments"])
+
 
 def test_cli_shell_path_custom_material_json_actually_used(ccx_path, tmp_path):
     """`--material-json` must actually flow through to the solved

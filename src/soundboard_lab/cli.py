@@ -49,9 +49,16 @@ from soundboard_lab.materials import (
 )
 from soundboard_lab.mesh import mesh_surface, write_frequency_inp_orthotropic
 from soundboard_lab.mobility import KGF_TO_N, evaluate_bridge_mobility
+from soundboard_lab.mode_energy import build_mode_energy
 from soundboard_lab.repair import MeshRepairError, repair_stl
 from soundboard_lab.shell_mesh import mode_shape_z_displacement, shell_from_closed_mesh, write_shell_frequency_inp
-from soundboard_lab.solver import CcxError, parse_eigenfrequencies, parse_frd_mode_displacements, run_ccx
+from soundboard_lab.solver import (
+    CcxError,
+    parse_eigenfrequencies,
+    parse_frd_mode_displacements,
+    parse_frd_mode_energy_density,
+    run_ccx,
+)
 
 MIN_THROUGH_THICKNESS_LAYERS = 2
 
@@ -332,6 +339,20 @@ def run_shell_analysis(
             ).tolist()
             for m in modes
         }
+        mode_energy_density = parse_frd_mode_energy_density(inp_path.with_suffix(".frd"))
+        thickness = shell.top_z - shell.bottom_z
+        mode_energy = {}
+        for m in modes:
+            energy_map = build_mode_energy(
+                shell.xy,
+                shell.top_z,
+                shell.triangles,
+                write_result.corner_node_ids,
+                thickness,
+                mode_energy_density[m.mode_number],
+            )
+            if energy_map is not None:
+                mode_energy[str(m.mode_number)] = energy_map
         mobility = None
         if bridge_probe is not None:
             mobility = evaluate_bridge_mobility(
@@ -364,6 +385,7 @@ def run_shell_analysis(
             "triangles": shell.triangles.tolist(),
         },
         "mode_shapes": mode_shapes,
+        "mode_energy": mode_energy,
         "bonded_bodies": [
             {
                 "name": name,

@@ -169,15 +169,35 @@ def parse_frd_mode_displacements(frd_path: Path) -> dict[int, dict[int, tuple[fl
     `-4  DISP` sub-header immediately followed by `-5` component-name
     lines, then `-1`-prefixed data rows, terminated by a `-3` line.
     """
+    results = _parse_frd_mode_field(Path(frd_path), "DISP", 3, "was *NODE FILE / U requested?")
+    return {mode: {node: (v[0], v[1], v[2]) for node, v in nodes.items()} for mode, nodes in results.items()}
+
+
+def parse_frd_mode_energy_density(frd_path: Path) -> dict[int, dict[int, float]]:
+    """Per-node strain-energy density (`ENER`, energy per volume) of
+    every eigenmode from a ccx `.frd`, as `{mode: {node_id: value}}`.
+    ccx extrapolates it from the element integration points to the
+    nodes and averages across the elements sharing a node. Needs
+    `ENER` in the step's `*EL FILE` request (`mesh._frequency_step_cards`).
+    """
+    results = _parse_frd_mode_field(Path(frd_path), "ENER", 1, "was *EL FILE / ENER requested?")
+    return {mode: {node: v[0] for node, v in nodes.items()} for mode, nodes in results.items()}
+
+
+def _parse_frd_mode_field(
+    frd_path: Path, field_name: str, n_components: int, hint: str
+) -> dict[int, dict[int, tuple[float, ...]]]:
+    """`{mode: {node_id: (component, ...)}}` for the `field_name`
+    block of each `1PMODE` section (fixed-width rows, see
+    `parse_frd_mode_displacements`)."""
     text = Path(frd_path).read_text()
-    lines = text.splitlines()
 
-    results: dict[int, dict[int, tuple[float, float, float]]] = {}
+    results: dict[int, dict[int, tuple[float, ...]]] = {}
     current_mode: int | None = None
-    in_disp_block = False
-    current_displacements: dict[int, tuple[float, float, float]] = {}
+    in_block = False
+    current: dict[int, tuple[float, ...]] = {}
 
-    for line in lines:
+    for line in text.splitlines():
         mode_match = _MODE_HEADER.match(line)
         if mode_match is not None:
             current_mode = int(mode_match.group(1))
@@ -185,28 +205,25 @@ def parse_frd_mode_displacements(frd_path: Path) -> dict[int, dict[int, tuple[fl
 
         field_match = _FIELD_HEADER.match(line)
         if field_match is not None:
-            in_disp_block = field_match.group(1) == "DISP"
-            if in_disp_block:
-                current_displacements = {}
+            in_block = field_match.group(1) == field_name
+            if in_block:
+                current = {}
             continue
 
-        if not in_disp_block:
+        if not in_block:
             continue
 
         if line.startswith(" -1"):
             node_id = int(line[3:13])
-            dx = float(line[13:25])
-            dy = float(line[25:37])
-            dz = float(line[37:49])
-            current_displacements[node_id] = (dx, dy, dz)
+            current[node_id] = tuple(float(line[13 + 12 * i : 25 + 12 * i]) for i in range(n_components))
         elif line.startswith(" -3"):
             if current_mode is not None:
-                results[current_mode] = current_displacements
-            in_disp_block = False
+                results[current_mode] = current
+            in_block = False
 
     if not results:
         raise CcxError(
-            f"No DISP results found in {Path(frd_path).name} -- was *NODE FILE / U requested?",
+            f"No {field_name} results found in {Path(frd_path).name} -- {hint}",
             returncode=0,
             stdout=text,
             stderr="",

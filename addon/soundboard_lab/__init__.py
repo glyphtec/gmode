@@ -139,6 +139,7 @@ class SoundboardLabObjectSettings(bpy.types.PropertyGroup):
             ('BOND_PROXY', "Bond Proxy", "Meshed body skin used for bond detection"),
             ('SOUNDBOARD_PROXY', "Soundboard Proxy", "Solver-meshed soundboard surface used as the bond reference"),
             ('MODE_SHAPE', "Mode Shape", "Mode-shape result display"),
+            ('MODE_CONTOURS', "Mode Energy Contours", "Strain-energy iso-lines over the mode-shape display"),
         ],
         default='NONE',
     )
@@ -767,7 +768,11 @@ class SOUNDBOARD_PT_results(bpy.types.Panel):
             scene, "soundboard_lab_results",
             scene, "soundboard_lab_selected_mode_index",
         )
-        layout.label(text="Select a mode to show its Z-displacement heat map", icon='INFO')
+        layout.row().prop(scene, "soundboard_lab_mode_view", expand=True)
+        if scene.soundboard_lab_mode_view == 'ENERGY':
+            layout.label(text="Strain energy per area; contours at 20-100% of the scale", icon='INFO')
+        else:
+            layout.label(text="Select a mode to show its Z-displacement heat map", icon='INFO')
 
         mobility = scene.soundboard_lab_mobility
         if mobility.available:

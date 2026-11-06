@@ -157,7 +157,7 @@ def _frequency_step_cards(n_frequencies: int) -> list[str]:
         "*NODE FILE",
         "U",
         "*EL FILE",
-        "S, E",
+        "S, E, ENER",
         "*OUTPUT, FREQUENCY=1",
         "*END STEP",
     ]

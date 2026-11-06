@@ -359,6 +359,22 @@ assert addon.analysis.find_soundboard_object(bpy.context) == fixture_obj
 preview_obj.soundboard_lab.role = 'NONE'
 print("Mode selection -> preview rebuild check passed")
 
+# Strain Energy view: energy-colored preview plus a single tagged iso-line
+# object (loose edges, no faces); switching back removes the iso-lines.
+assert set(result["mode_energy"]) == set(result["mode_shapes"]), "every solved mode should carry an energy map"
+bpy.context.scene.soundboard_lab_mode_view = 'ENERGY'
+assert "ModeEnergy" in preview_obj.data.color_attributes
+contour_objs = [o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_CONTOURS']
+assert len(contour_objs) == 1, "energy view should build exactly one tagged iso-line object"
+assert len(contour_objs[0].data.edges) > 0 and len(contour_objs[0].data.polygons) == 0
+assert list(contour_objs[0].users_collection) == [results_coll]
+bpy.context.scene.soundboard_lab_selected_mode_index = 1
+assert len([o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_CONTOURS']) == 1
+bpy.context.scene.soundboard_lab_mode_view = 'DISPLACEMENT'
+assert not [o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_CONTOURS']
+assert "ModeShapeZ" in preview_obj.data.color_attributes
+print("Strain energy view / iso-line check passed")
+
 # Real GUI bug, confirmed live: a fixed-size display offset isn't
 # enough -- depth-buffer precision degrades with camera distance, so
 # the same offset that looks fine up close Z-fights again once zoomed

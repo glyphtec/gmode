@@ -605,6 +605,7 @@ def build_mode_shape_preview(
     triangles: list,
     z_displacement: list,
     source: bpy.types.Object | None = None,
+    energy_scale: float | None = None,
 ) -> bpy.types.Object:
     """Build (or replace the existing one) the add-on-owned mode-shape
     display object in the "Analysis Results" generated collection --
@@ -618,6 +619,10 @@ def build_mode_shape_preview(
     the 3D viewport, which is the actual goal here (an animated/
     exaggerated deformed shape was explicitly NOT wanted -- a static
     heat map on the real geometry is "table stakes" and sufficient).
+
+    With `energy_scale`, the values are instead a non-negative strain-
+    energy map (`mode_energy.py`) colored 0 -> `energy_scale` (blue ->
+    red, clipped above), not symmetric around zero.
 
     No display offset: the preview sits exactly on the solved top
     surface (generated objects never displace from true geometry --
@@ -646,7 +651,29 @@ def build_mode_shape_preview(
     mesh.from_pydata(vertices, [], [tuple(tri) for tri in triangles])
     mesh.update()
 
-    color_attr = mesh.color_attributes.new(name="ModeShapeZ", type='FLOAT_COLOR', domain='POINT')
+    color_attr = mesh.color_attributes.new(
+        name="ModeShapeZ" if energy_scale is None else "ModeEnergy", type='FLOAT_COLOR', domain='POINT'
+    )
+    if energy_scale is not None:
+        for i, e in enumerate(z_displacement):
+            r, g, b = _jet_colormap(e / energy_scale if energy_scale > 0.0 else 0.0)
+            color_attr.data[i].color = (r, g, b, 1.0)
+    else:
+        _color_signed_displacement(color_attr, z_displacement)
+
+    if obj is None:
+        obj = bpy.data.objects.new(name, mesh)
+        results_collection.objects.link(obj)
+        obj.soundboard_lab.generated_kind = 'MODE_SHAPE'
+        obj.hide_render = True
+    generated.link_exclusively(obj, results_collection)
+    obj.soundboard_lab.source_object = source
+
+    _set_viewport_vertex_color_shading()
+    return obj
+
+
+def _color_signed_displacement(color_attr, z_displacement: list) -> None:
     # Normalize SYMMETRICALLY around zero, not plain (dz-min)/(max-min):
     # an eigenmode's absolute sign/scale is mathematically arbitrary, so
     # a mode can easily come back almost entirely one-signed (confirmed
@@ -663,15 +690,49 @@ def build_mode_shape_preview(
         r, g, b = _jet_colormap(t)
         color_attr.data[i].color = (r, g, b, 1.0)
 
+
+# Contour lines sit this far above the preview surface so they aren't
+# lost to depth-buffer ties with it (they are lines, not a second surface).
+_CONTOUR_LIFT_MM = 0.2
+
+
+def build_mode_energy_contours(
+    context, name: str, contours: list[dict], source: bpy.types.Object | None = None
+) -> bpy.types.Object:
+    """Build (or replace) the strain-energy iso-line object: loose
+    edges, one per contour segment (`[x0, y0, z0, x1, y1, z1]`, see
+    `mode_energy.build_mode_energy`), in the "Analysis Results"
+    generated collection."""
+    from . import generated
+
+    _root, _bonding, results_collection = generated.ensure_generated_collections(context.scene)
+    vertices = []
+    edges = []
+    for contour in contours:
+        for x0, y0, z0, x1, y1, z1 in contour["segments"]:
+            edges.append((len(vertices), len(vertices) + 1))
+            vertices.append((x0, y0, z0 + _CONTOUR_LIFT_MM))
+            vertices.append((x1, y1, z1 + _CONTOUR_LIFT_MM))
+
+    obj = next(
+        (o for o in context.scene.objects if o.soundboard_lab.generated_kind == 'MODE_CONTOURS'),
+        None,
+    )
+    if obj is not None and obj.type == 'MESH':
+        mesh = obj.data
+        mesh.clear_geometry()
+    else:
+        mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(vertices, edges, [])
+    mesh.update()
+
     if obj is None:
         obj = bpy.data.objects.new(name, mesh)
         results_collection.objects.link(obj)
-        obj.soundboard_lab.generated_kind = 'MODE_SHAPE'
+        obj.soundboard_lab.generated_kind = 'MODE_CONTOURS'
         obj.hide_render = True
     generated.link_exclusively(obj, results_collection)
     obj.soundboard_lab.source_object = source
-
-    _set_viewport_vertex_color_shading()
     return obj
 
 
@@ -743,6 +804,7 @@ _active_handle = None
 # is read only by the same session's mode-selection handler below.
 _last_mesh_shape = None
 _last_mode_shapes = None
+_last_mode_energy = None
 
 
 def _update_step_status(scene, status: dict) -> None:
@@ -760,7 +822,7 @@ def _update_step_status(scene, status: dict) -> None:
 
 
 def _apply_result(scene, result: dict) -> None:
-    global _last_mesh_shape, _last_mode_shapes
+    global _last_mesh_shape, _last_mode_shapes, _last_mode_energy
     scene.soundboard_lab_results.clear()
     scene.soundboard_lab_mobility.available = False
     if result["status"] == "ok":
@@ -799,12 +861,14 @@ def _apply_result(scene, result: dict) -> None:
             item.frequency_hz = mode["frequency_hz"]
         _last_mesh_shape = result.get("mesh_shape")
         _last_mode_shapes = result.get("mode_shapes")
+        _last_mode_energy = result.get("mode_energy")
         scene.soundboard_lab_selected_mode_index = 0
     else:
         scene.soundboard_lab_status = 'ERROR'
         scene.soundboard_lab_message = result.get("message", "Unknown error")
         _last_mesh_shape = None
         _last_mode_shapes = None
+        _last_mode_energy = None
 
 
 def _poll_timer():
@@ -842,9 +906,11 @@ def _update_mode_shape_preview(scene) -> None:
     if index < 0 or index >= len(scene.soundboard_lab_results):
         return
     item = scene.soundboard_lab_results[index]
-    z_displacement = _last_mode_shapes.get(str(item.mode_number))
+    mode_key = str(item.mode_number)
+    z_displacement = _last_mode_shapes.get(mode_key)
     if z_displacement is None:
         return
+    energy = (_last_mode_energy or {}).get(mode_key) if scene.soundboard_lab_mode_view == 'ENERGY' else None
     try:
         soundboard_obj = find_soundboard_object(bpy.context)
     except SoundboardLabSceneError as exc:
@@ -856,14 +922,27 @@ def _update_mode_shape_preview(scene) -> None:
         _last_mesh_shape["xy"],
         _last_mesh_shape["top_z"],
         _last_mesh_shape["triangles"],
-        z_displacement,
+        energy["energy_per_area"] if energy is not None else z_displacement,
         source=soundboard_obj,
+        energy_scale=energy["display_scale"] if energy is not None else None,
     )
+    if energy is not None:
+        build_mode_energy_contours(
+            bpy.context, "Soundboard Mode Energy Contours", energy["contours"], source=soundboard_obj
+        )
+    else:
+        from . import generated
+
+        generated.remove_generated_objects(scene, {'MODE_CONTOURS'})
     if soundboard_obj is not None:
         _set_soundboard_visibility(soundboard_obj, visible=False)
 
 
 def _on_selected_mode_index_update(self, context):
+    _update_mode_shape_preview(self)
+
+
+def _on_mode_view_update(self, context):
     _update_mode_shape_preview(self)
 
 
@@ -1001,6 +1080,19 @@ def register():
     bpy.types.Scene.soundboard_lab_selected_mode_index = bpy.props.IntProperty(
         name="Selected Mode", default=0, update=_on_selected_mode_index_update
     )
+    bpy.types.Scene.soundboard_lab_mode_view = bpy.props.EnumProperty(
+        name="Mode View",
+        items=[
+            ('DISPLACEMENT', "Displacement", "Signed Z-displacement heat map (Chladni-style nodal lines)"),
+            (
+                'ENERGY', "Strain Energy",
+                "Where the mode stores its bending energy -- the places a stiffener can change it -- "
+                "with iso-energy contour lines",
+            ),
+        ],
+        default='DISPLACEMENT',
+        update=_on_mode_view_update,
+    )
     bpy.types.Scene.soundboard_lab_status = bpy.props.EnumProperty(
         items=[
             ('IDLE', "Idle", "No analysis run yet"),
@@ -1037,14 +1129,16 @@ def register():
 
 
 def unregister():
-    global _active_handle, _last_mesh_shape, _last_mode_shapes
+    global _active_handle, _last_mesh_shape, _last_mode_shapes, _last_mode_energy
     _active_handle = None
     _last_mesh_shape = None
     _last_mode_shapes = None
+    _last_mode_energy = None
     del bpy.types.Scene.soundboard_lab_boundary_condition
     del bpy.types.Scene.soundboard_lab_n_frequencies
     del bpy.types.Scene.soundboard_lab_message
     del bpy.types.Scene.soundboard_lab_status
+    del bpy.types.Scene.soundboard_lab_mode_view
     del bpy.types.Scene.soundboard_lab_selected_mode_index
     del bpy.types.Scene.soundboard_lab_compute_mm
     del bpy.types.Scene.soundboard_lab_mobility

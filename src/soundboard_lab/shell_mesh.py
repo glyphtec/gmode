@@ -553,6 +553,8 @@ class ShellInpWriteResult:
     # needed to map a solved mode's per-node displacement (from
     # solver.parse_frd_mode_displacements) back onto the shell's own
     # footprint for a mode-shape visualization.
+    corner_node_ids: np.ndarray  # (num_layers + 1, V): the same, at every extrusion level (row -1 is
+    # `top_layer_node_ids`) -- for integrating a per-node field through the thickness.
 
 
 def mode_shape_z_displacement(
@@ -676,5 +678,9 @@ def write_shell_frequency_inp(
 
     lines += _frequency_step_cards(n_frequencies)
     Path(inp_path).write_text("\n".join(lines) + "\n")
-    return ShellInpWriteResult(element_count=len(elements), top_layer_node_ids=corner_node_ids[num_layers, :].copy())
+    return ShellInpWriteResult(
+        element_count=len(elements),
+        top_layer_node_ids=corner_node_ids[num_layers, :].copy(),
+        corner_node_ids=corner_node_ids.copy(),
+    )
 

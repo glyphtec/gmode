@@ -138,6 +138,7 @@ class AssemblyBody:
 class AssemblyInpWriteResult:
     element_count: int
     top_layer_node_ids: np.ndarray  # same meaning as ShellInpWriteResult's
+    corner_node_ids: np.ndarray  # (num_layers + 1, V), same meaning as ShellInpWriteResult's
     tie_node_counts: dict[str, int]  # slave nodes per body
     terminal_node_counts: dict[str, int] = field(default_factory=dict)  # bodies with a terminal only
     attachments: list[AttachmentPlacement] = field(default_factory=list)
@@ -493,6 +494,7 @@ def write_assembly_frequency_inp(
     return AssemblyInpWriteResult(
         element_count=element_offset,
         top_layer_node_ids=prisms.corner_node_ids[num_layers, :].copy(),
+        corner_node_ids=prisms.corner_node_ids.copy(),
         tie_node_counts=tie_counts,
         terminal_node_counts=terminal_counts,
         attachments=placements,
