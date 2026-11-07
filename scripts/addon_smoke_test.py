@@ -385,7 +385,7 @@ def _extent_y(obj):
 narrow = _extent_y(direction_objs[0])
 bpy.context.scene.soundboard_lab_line_width = 4.0
 assert _extent_y(direction_objs[0]) > narrow, "a wider Line Width must widen the ribbons"
-bpy.context.scene.soundboard_lab_line_width = 0.9
+bpy.context.scene.soundboard_lab_line_width = 0.6
 assert set(result["mode_curvature"]) == set(result["mode_shapes"])
 bpy.context.scene.soundboard_lab_show_directions = False
 assert not [o for o in bpy.data.objects if o.soundboard_lab.generated_kind == 'MODE_DIRECTIONS']

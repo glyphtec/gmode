@@ -71,7 +71,7 @@ def display_scale(values: np.ndarray, percentile: float = 98.0) -> float:
     return float(np.percentile(values, percentile))
 
 
-CONTOUR_FRACTIONS = (0.2, 0.4, 0.6, 0.8, 1.0)
+CONTOUR_FRACTIONS = (0.4, 0.7, 1.0)
 
 
 def build_mode_energy(

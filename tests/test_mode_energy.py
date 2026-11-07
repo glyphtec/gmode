@@ -113,5 +113,5 @@ def test_mode_energy_matches_modal_strain_energy_on_a_real_fixed_edge_solve(ccx_
         assert integrate_over_area(shell.xy, shell.triangles, density) == pytest.approx(1.0)
         assert int(np.argmax(density)) in outer
         assert payload["display_scale"] > 0.0
-        assert [c["fraction"] for c in payload["contours"]] == [0.2, 0.4, 0.6, 0.8, 1.0]
+        assert [c["fraction"] for c in payload["contours"]] == [0.4, 0.7, 1.0]
         assert all(len(c["segments"]) > 0 for c in payload["contours"][:3])

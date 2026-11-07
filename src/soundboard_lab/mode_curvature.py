@@ -207,7 +207,7 @@ def sample_direction_ticks(
     grid: TickGrid,
     triangles: np.ndarray,
     vertex_hessian: np.ndarray,
-    min_fraction: float = 0.1,
+    min_fraction: float = 0.3,
     percentile: float = 98.0,
 ) -> np.ndarray:
     """(S, 6) short line segments `(x0, y0, z0, x1, y1, z1)` at the
@@ -226,7 +226,7 @@ def sample_direction_ticks(
     strength = np.minimum(np.abs(k1) / scale, 1.0)
     keep = strength >= min_fraction
     centre = grid.points[keep]
-    half = (0.57 * grid.spacing * strength[keep])[:, None] * np.column_stack(
+    half = (0.45 * grid.spacing * strength[keep])[:, None] * np.column_stack(
         [np.cos(angle[keep]), np.sin(angle[keep])]
     )
     zc = grid.z[keep]
@@ -234,10 +234,10 @@ def sample_direction_ticks(
 
 
 def default_tick_spacing(xy: np.ndarray, triangles: np.ndarray) -> float:
-    """1.75 mean element edge lengths: between the dense grid that made
-    short ticks hard to read and the sparse one that made long ticks
-    look heavy."""
-    return 1.75 * float(np.sqrt(triangle_areas(xy, triangles).mean() * 2.0))
+    """2.25 mean element edge lengths: with the tick length fixed at
+    about 2 edges (0.9 x spacing at full strength), ticks sit about a
+    tick-length apart instead of crowding each other."""
+    return 2.25 * float(np.sqrt(triangle_areas(xy, triangles).mean() * 2.0))
 
 
 def build_mode_curvature(

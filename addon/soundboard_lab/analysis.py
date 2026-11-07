@@ -1171,7 +1171,7 @@ def register():
     bpy.types.Scene.soundboard_lab_line_width = bpy.props.FloatProperty(
         name="Line Width",
         description="Width of the iso-energy contour lines and bending ticks, in mm on the soundboard",
-        default=0.9,
+        default=0.6,
         min=0.2,
         max=8.0,
         update=_on_mode_view_update,
