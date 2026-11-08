@@ -139,6 +139,10 @@ def test_synthetic_export_writes_the_documented_layout(tmp_path):
     m1, m2, m3 = manifest["modes"]
     assert m1["is_m1"] and not m2["is_m1"]
     assert m1["mobility"]["fraction"] == 0.8 and m3["mobility"] is None
+    # Mode 1 alone at the bridge: k = 1 / 0.25 mm/kgf, m = k / omega^2.
+    assert m1["mobility"]["modal_stiffness_kgf_per_mm"] == pytest.approx(4.0)
+    assert m1["mobility"]["modal_mass_g"] == pytest.approx(4.0 * 9.80665 * 1000.0 / (2 * np.pi * 101.25) ** 2 * 1000.0, rel=1e-6)
+    assert m2["mobility"]["modal_stiffness_kgf_per_mm"] == pytest.approx(20.0)
     assert m1["strain_energy"]["plate_energy_ratio"] == 0.955
     assert (folder / m1["strain_energy"]["image"]).is_file() and (folder / m2["strain_energy"]["image"]).is_file()
     assert m3["strain_energy"] is None, "a mode without an energy map is recorded, not faked"
@@ -169,6 +173,36 @@ def test_modes_are_sign_normalised_in_fields_images_and_hessian(tmp_path):
     assert np.isnan(fields["energy_per_area"][2]).all() and np.isnan(fields["hessian"][2]).all()
     assert np.array_equal(fields["mode_numbers"], [1, 2, 3])
     assert fields["thickness"].shape == (81,) and fields["triangles"].shape[1] == 3
+
+
+def test_mobility_phi_follows_the_same_sign_convention_as_the_images(tmp_path):
+    work = _synthetic_work_dir(tmp_path)
+    folder = write_experiment(work, tmp_path / "out", "phi", options=ExportOptions(displacement_images=False,
+                              energy_images=False, fields=False, solver_files=False))
+    manifest = json.loads((folder / "experiment.json").read_text())
+    m1, m2, _m3 = manifest["modes"]
+    # Mode 2 was flipped on export; its raw phi were (-0.05, -0.05). Both flip together, so the product is unchanged.
+    assert m2["displacement"]["sign_flipped"] is True
+    assert (m2["mobility"]["phi_drive"], m2["mobility"]["phi_read"]) == (0.05, 0.05)
+    assert (m1["mobility"]["phi_drive"], m1["mobility"]["phi_read"]) == (0.1, 0.1)
+    row = list(csv.DictReader((folder / "modes.csv").open()))[1]
+    assert (row["phi_drive"], row["phi_read"]) == ("0.05", "0.05")
+
+
+def test_a_mode_that_opposes_the_static_deflection_has_no_modal_stiffness_or_mass(tmp_path):
+    work = _synthetic_work_dir(tmp_path)
+    result = json.loads((work / "result.json").read_text())
+    result["bridge_mobility"]["modes"][1]["compliance_mm_per_kgf"] = -0.02
+    result["bridge_mobility"]["modes"][1]["fraction"] = -0.05
+    (work / "result.json").write_text(json.dumps(result))
+    folder = write_experiment(work, tmp_path / "out", "neg", options=ExportOptions(displacement_images=False,
+                              energy_images=False, fields=False, solver_files=False))
+    manifest = json.loads((folder / "experiment.json").read_text())
+    assert manifest["modes"][1]["mobility"]["modal_stiffness_kgf_per_mm"] is None
+    assert manifest["modes"][1]["mobility"]["modal_mass_g"] is None
+    assert manifest["modes"][1]["mobility"]["fraction"] == -0.05, "the share itself is kept"
+    row = list(csv.DictReader((folder / "modes.csv").open()))[1]
+    assert row["modal_stiffness_kgf_per_mm"] == "" and row["modal_mass_g"] == "" and row["mobility_fraction"] == "-0.05"
 
 
 def test_options_switch_off_images_fields_and_solver_files(tmp_path):

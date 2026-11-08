@@ -54,6 +54,7 @@ from soundboard_lab.mode_images import (
 
 SCHEMA = "soundboard_lab.experiment"
 SCHEMA_VERSION = 1
+KGF_TO_N = 9.80665
 
 
 @dataclass(frozen=True)
@@ -247,11 +248,20 @@ def _write_into(
 
         if number in mobility_by_mode:
             share = mobility_by_mode[number]
+            compliance = float(share["compliance_mm_per_kgf"])
+            modal_stiffness = modal_mass = None
+            if compliance > 0.0:  # a mode that opposes the static deflection has no meaningful stiffness/mass
+                modal_stiffness = 1.0 / compliance  # kgf/mm, this mode acting alone at the bridge
+                omega = 2.0 * np.pi * float(mode["frequency_hz"])
+                modal_mass = modal_stiffness * KGF_TO_N * 1000.0 / omega**2 * 1000.0  # g
             entry["mobility"] = {
                 "fraction": _round(share["fraction"]),
-                "compliance_mm_per_kgf": _round(share["compliance_mm_per_kgf"]),
-                "phi_drive": _round(share["phi_drive"]),
-                "phi_read": _round(share["phi_read"]),
+                "compliance_mm_per_kgf": _round(compliance),
+                "modal_stiffness_kgf_per_mm": _round(modal_stiffness),
+                "modal_mass_g": _round(modal_mass),
+                # Same sign convention as the images and fields (both flip together; their product does not).
+                "phi_drive": _round(share["phi_drive"] * sign),
+                "phi_read": _round(share["phi_read"] * sign),
             }
         mode_entries.append(entry)
 
@@ -343,6 +353,12 @@ def _write_into(
             "sign_normalized": "the largest-magnitude displacement of each mode is positive",
             "displacement_units": "mass-normalised eigenvector (arbitrary scale)",
             "energy_per_area": "per-mode strain energy per plan area, normalised to integrate to 1 over the footprint",
+            "mobility_modes": (
+                "per mode at the bridge: phi_drive/phi_read are the mass-normalised mode's Z motion (1/sqrt(tonne)) "
+                "averaged over the drive patches / read patch, in the same sign convention as the images; "
+                "compliance = phi_drive*phi_read/omega^2 is the mode's share of the static compliance (fraction); "
+                "modal_stiffness = 1/compliance and modal_mass = stiffness/omega^2 are the mode acting alone at the bridge"
+            ),
             "lengths": "mm",
         },
         "files": files,
@@ -369,7 +385,8 @@ def _write_modes_csv(path: Path, entries: list[dict]) -> None:
     columns = [
         "mode_number", "frequency_hz", "is_m1", "peak_x_mm", "peak_y_mm", "sign_flipped",
         "energy_centroid_x_mm", "energy_centroid_y_mm", "total_strain_energy", "plate_energy_ratio",
-        "mobility_fraction", "compliance_mm_per_kgf", "phi_drive", "phi_read",
+        "mobility_fraction", "compliance_mm_per_kgf", "modal_stiffness_kgf_per_mm", "modal_mass_g",
+        "phi_drive", "phi_read",
     ]
     with path.open("w", newline="") as handle:
         writer = csv.writer(handle)
@@ -385,6 +402,8 @@ def _write_modes_csv(path: Path, entries: list[dict]) -> None:
                     e["displacement"]["sign_flipped"],
                     centroid[0], centroid[1], energy.get("total_energy", ""), energy.get("plate_energy_ratio", ""),
                     share.get("fraction", ""), share.get("compliance_mm_per_kgf", ""),
+                    "" if share.get("modal_stiffness_kgf_per_mm") is None else share["modal_stiffness_kgf_per_mm"],
+                    "" if share.get("modal_mass_g") is None else share["modal_mass_g"],
                     share.get("phi_drive", ""), share.get("phi_read", ""),
                 ]
             )
