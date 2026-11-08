@@ -14,10 +14,13 @@ only the thin "don't block Blender's UI thread" wrapper around them
 needs bpy.app.timers, and that wrapper is intentionally minimal.
 """
 
+import hashlib
 import json
 import math
 import subprocess
 import tempfile
+import tomllib
+from datetime import datetime
 from pathlib import Path
 
 import bpy
@@ -51,11 +54,13 @@ def _prefs_cache_path() -> Path:
     return Path(bpy.utils.user_resource('CONFIG')) / "soundboard_lab_prefs_cache.json"
 
 
-def _save_prefs_cache(ccx_path: str, engine_python_path: str) -> None:
+def _save_prefs_cache(ccx_path: str, engine_python_path: str, export_path: str = "") -> None:
     """Best-effort, non-fatal -- a failed cache write must never break
     the actual preferences field the user just edited."""
     try:
-        _prefs_cache_path().write_text(json.dumps({"ccx_path": ccx_path, "engine_python_path": engine_python_path}))
+        _prefs_cache_path().write_text(
+            json.dumps({"ccx_path": ccx_path, "engine_python_path": engine_python_path, "export_path": export_path})
+        )
     except Exception as exc:
         print(f"Soundboard Lab: failed to write prefs cache (non-fatal): {exc!r}")
 
@@ -72,7 +77,7 @@ def _load_prefs_cache() -> dict | None:
 
 
 def _on_prefs_path_update(self, context):
-    _save_prefs_cache(self.ccx_path, self.engine_python_path)
+    _save_prefs_cache(self.ccx_path, self.engine_python_path, self.export_path)
 
 
 def _restore_prefs_from_cache_if_empty():
@@ -89,7 +94,7 @@ def _restore_prefs_from_cache_if_empty():
     except Exception as exc:
         print(f"Soundboard Lab: couldn't restore prefs from cache (non-fatal): {exc!r}")
         return None  # don't reschedule; nothing more we can do this session
-    if prefs.ccx_path and prefs.engine_python_path:
+    if prefs.ccx_path and prefs.engine_python_path and prefs.export_path:
         return None  # already populated -- nothing to restore
     cached = _load_prefs_cache()
     if cached is None:
@@ -98,7 +103,9 @@ def _restore_prefs_from_cache_if_empty():
         prefs.ccx_path = cached.get("ccx_path", "")
     if not prefs.engine_python_path:
         prefs.engine_python_path = cached.get("engine_python_path", "")
-    print("Soundboard Lab: restored ccx/engine Python paths from the fallback prefs cache")
+    if not prefs.export_path:
+        prefs.export_path = cached.get("export_path", "")
+    print("Soundboard Lab: restored ccx/engine Python/export paths from the fallback prefs cache")
     return None
 
 
@@ -123,11 +130,21 @@ class SoundboardLabPreferences(bpy.types.AddonPreferences):
         subtype='FILE_PATH',
         update=_on_prefs_path_update,
     )
+    export_path: bpy.props.StringProperty(
+        name="Export Folder",
+        description=(
+            "Folder that Results & Verification > Export Results writes experiment sub-folders into "
+            "(images, mode data, manifest) for browsing outside Blender"
+        ),
+        subtype='DIR_PATH',
+        update=_on_prefs_path_update,
+    )
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "ccx_path")
         layout.prop(self, "engine_python_path")
+        layout.prop(self, "export_path")
         for label, path in (("ccx", self.ccx_path), ("Engine Python", self.engine_python_path)):
             if path and not Path(path).is_file():
                 layout.label(text=f"{label} path does not exist", icon='ERROR')
@@ -336,6 +353,18 @@ def export_triangulated_stl(context, obj: bpy.types.Object, stl_path: Path) -> i
 # ---------------------------------------------------------------------------
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _addon_version() -> str | None:
+    try:
+        manifest = tomllib.loads((Path(__file__).parent / "blender_manifest.toml").read_text())
+        return manifest.get("version")
+    except Exception:
+        return None
+
+
 def start_solve(
     context,
     obj: bpy.types.Object,
@@ -434,6 +463,7 @@ def start_solve(
         cmd += ["--material-json", str(material_json_path)]
     if orientation is not None:
         cmd += ["--orientation", ",".join(str(v) for v in orientation)]
+    body_inputs = []
     if bonded_bodies:
         entries = []
         for index, body in enumerate(bonded_bodies):
@@ -448,6 +478,12 @@ def start_solve(
                 "orientation": list(body["orientation"]) if body.get("orientation") is not None else None,
                 "terminal": body.get("terminal"),
             })
+            body_inputs.append({
+                "name": body_obj.name,
+                "role": body_obj.soundboard_lab.role,
+                "stl_sha256": _sha256(body_stl),
+                **{k: v for k, v in entries[-1].items() if k not in ("name", "stl")},
+            })
         bodies_json_path = work_dir / "bodies.json"
         bodies_json_path.write_text(json.dumps({"tolerance": tie_tolerance, "bodies": entries}, indent=2))
         cmd += ["--bodies-json", str(bodies_json_path)]
@@ -459,6 +495,34 @@ def start_solve(
         mobility_json_path = work_dir / "mobility.json"
         mobility_json_path.write_text(json.dumps(mobility, indent=2))
         cmd += ["--mobility-json", str(mobility_json_path)]
+
+    # Everything that defines this experiment, recorded beside the result
+    # so an export (and the gallery built on it) is self-describing even
+    # after the scene has changed.
+    inputs = {
+        "solved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "blend_file": bpy.data.filepath,
+        "blender_version": bpy.app.version_string,
+        "addon_version": _addon_version(),
+        "soundboard": {
+            "object": obj.name,
+            "stl_sha256": _sha256(stl_path),
+            "element_size": settings.mesh_element_size,
+            "thickness_hint": settings.mesh_thickness_hint,
+            "num_layers": num_layers,
+            "material": material,
+            "orientation": list(orientation) if orientation is not None else None,
+        },
+        "parameters": {
+            "n_frequencies": n_frequencies,
+            "boundary_condition": boundary_condition,
+            "tie_tolerance": tie_tolerance,
+        },
+        "bodies": body_inputs,
+        "attachments": attachments or [],
+        "mobility": mobility,
+    }
+    (work_dir / "inputs.json").write_text(json.dumps(inputs, indent=2, default=str))
 
     process =  subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return {
@@ -850,6 +914,18 @@ def _tag_ui_redraw():
 
 _active_handle = None
 
+# Work directory (result.json, inputs.json, solver files) of the last
+# successful solve: the source for "Export Results". Cleared when a new
+# solve starts, so an export can never pair stale files with new results.
+_last_solve_dir: Path | None = None
+
+
+def last_solve_dir() -> Path | None:
+    if _last_solve_dir is not None and (_last_solve_dir / "result.json").is_file():
+        return _last_solve_dir
+    return None
+
+
 # Cached per-solve data the mode-shape preview needs (solved mesh
 # footprint + every mode's per-node Z-displacement) -- not stored as
 # bpy Scene properties, since those don't hold nested Python
@@ -928,7 +1004,7 @@ def _apply_result(scene, result: dict) -> None:
 
 
 def _poll_timer():
-    global _active_handle
+    global _active_handle, _last_solve_dir
     if _active_handle is None:
         return None  # stop; nothing active (shouldn't normally happen)
 
@@ -945,6 +1021,7 @@ def _poll_timer():
         return 0.5  # still running; check again shortly
 
     _apply_result(bpy.context.scene, result)
+    _last_solve_dir = _active_handle["work_dir"] if result.get("status") == "ok" else None
     _active_handle = None
     _tag_ui_redraw()
     return None  # stop the timer
@@ -1055,7 +1132,7 @@ class SOUNDBOARD_OT_analyze(bpy.types.Operator):
         return _active_handle is None
 
     def execute(self, context):
-        global _active_handle
+        global _active_handle, _last_solve_dir
         from . import extract_material  # lazy: avoids a circular import with __init__.py at module load time
 
         try:
@@ -1095,6 +1172,7 @@ class SOUNDBOARD_OT_analyze(bpy.types.Operator):
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
 
+        _last_solve_dir = None
         context.scene.soundboard_lab_status = 'RUNNING'
         context.scene.soundboard_lab_message = ""
         context.scene.soundboard_lab_results.clear()
@@ -1213,6 +1291,8 @@ def register():
 
 def unregister():
     global _active_handle, _last_mesh_shape, _last_mode_shapes, _last_mode_energy, _last_mode_curvature
+    global _last_solve_dir
+    _last_solve_dir = None
     _active_handle = None
     _last_mesh_shape = None
     _last_mode_shapes = None

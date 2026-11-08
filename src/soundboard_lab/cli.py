@@ -401,6 +401,7 @@ def run_shell_analysis(
         "mesh_shape": {
             "xy": shell.xy.tolist(),
             "top_z": shell.top_z.tolist(),
+            "thickness": (shell.top_z - shell.bottom_z).tolist(),
             "triangles": shell.triangles.tolist(),
         },
         "mode_shapes": mode_shapes,

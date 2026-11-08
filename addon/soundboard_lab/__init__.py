@@ -11,7 +11,7 @@ import bmesh
 import bpy
 from mathutils import Matrix, Vector
 
-from . import analysis, bonds, generated
+from . import analysis, bonds, exporting, generated
 
 # Roles whose material may be orthotropic and therefore carries a grain axis
 # (see docs/CLAUDE.md, "Material library"). Bridge plate / mass load / lining
@@ -787,6 +787,13 @@ class SOUNDBOARD_PT_results(bpy.types.Panel):
                 text=f"MM: {mobility.mobility_m_per_s_per_n:.4g} ({mobility.mobility_m_per_s_per_n * 1000:.4g})"
             )
 
+        layout.separator()
+        layout.operator(exporting.SOUNDBOARD_OT_export_results.bl_idname, icon='EXPORT', text="Export Results...")
+        if scene.soundboard_lab_export_message:
+            layout.label(text=scene.soundboard_lab_export_message)
+        if scene.soundboard_lab_export_folder:
+            layout.operator(exporting.SOUNDBOARD_OT_open_export_folder.bl_idname, icon='FILE_FOLDER')
+
 
 # ---------------------------------------------------------------------------
 # Registration
@@ -811,6 +818,7 @@ classes = (
 
 def register():
     analysis.register()
+    exporting.register()
     bonds.register()
     for cls in classes:
         bpy.utils.register_class(cls)
@@ -832,5 +840,6 @@ def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     bonds.unregister()
+    exporting.unregister()
     analysis.unregister()
     print("Soundboard Lab: unregistered")

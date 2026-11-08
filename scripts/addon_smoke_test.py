@@ -273,9 +273,13 @@ _real_prefs_cache_path = addon.analysis._prefs_cache_path
 _test_cache_path = Path(bpy.app.tempdir) / "soundboard_lab_prefs_cache_TEST.json"
 addon.analysis._prefs_cache_path = lambda: _test_cache_path
 try:
-    addon.analysis._save_prefs_cache("C:\\fake\\ccx.exe", "C:\\fake\\python.exe")
+    addon.analysis._save_prefs_cache("C:\\fake\\ccx.exe", "C:\\fake\\python.exe", "C:\\fake\\exports")
     loaded = addon.analysis._load_prefs_cache()
-    assert loaded == {"ccx_path": "C:\\fake\\ccx.exe", "engine_python_path": "C:\\fake\\python.exe"}, loaded
+    assert loaded == {
+        "ccx_path": "C:\\fake\\ccx.exe",
+        "engine_python_path": "C:\\fake\\python.exe",
+        "export_path": "C:\\fake\\exports",
+    }, loaded
     print("Prefs fallback cache save/load check passed")
 finally:
     addon.analysis._prefs_cache_path = _real_prefs_cache_path
@@ -395,6 +399,44 @@ bpy.context.scene.soundboard_lab_mode_view = 'DISPLACEMENT'
 assert not [o for o in bpy.data.objects if o.soundboard_lab.generated_kind in ('MODE_CONTOURS', 'MODE_DIRECTIONS')]
 assert "ModeShapeZ" in preview_obj.data.color_attributes
 print("Strain energy view / iso-line check passed")
+
+# --- Export Results: a real export subprocess over the solve just done ---
+import json as _json
+import tempfile as _tempfile
+
+assert addon.analysis.last_solve_dir() is None, "nothing is exportable until a solve finishes via the timer"
+assert not bpy.ops.soundboard.export_results.poll()
+addon.analysis._last_solve_dir = handle["work_dir"]  # what _poll_timer does on success
+assert addon.analysis.last_solve_dir() == handle["work_dir"]
+assert bpy.ops.soundboard.export_results.poll()
+
+export_root = Path(_tempfile.mkdtemp(prefix="sbl_export_"))
+export_handle = addon.exporting.start_export(
+    handle["work_dir"], export_root, ENGINE_PYTHON, "Smoke Export", notes="smoke test", image_width=400
+)
+export_result = None
+for _ in range(240):
+    export_result = addon.exporting.poll_export(export_handle)
+    if export_result is not None:
+        break
+    time.sleep(0.5)
+assert export_result is not None, "export subprocess did not finish in time"
+assert export_result["status"] == "ok", export_result
+export_folder = Path(export_result["folder"])
+assert export_folder.parent == export_root and export_folder.name.endswith("_Smoke-Export")
+manifest = _json.loads((export_folder / "experiment.json").read_text())
+assert manifest["schema"] == "soundboard_lab.experiment" and manifest["notes"] == "smoke test"
+assert len(manifest["modes"]) == 10
+for mode_entry in manifest["modes"]:
+    assert (export_folder / mode_entry["displacement"]["image"]).is_file()
+    assert (export_folder / mode_entry["strain_energy"]["image"]).is_file()
+recorded = manifest["inputs"]
+assert recorded["blender_version"] == bpy.app.version_string
+assert recorded["soundboard"]["object"] == fixture_obj.name and len(recorded["soundboard"]["stl_sha256"]) == 64
+assert recorded["parameters"]["boundary_condition"] and recorded["parameters"]["n_frequencies"] == 10
+assert (export_folder / "solver" / "inputs.json").is_file() and (export_folder / "modes.csv").is_file()
+addon.analysis._last_solve_dir = None
+print("Export Results check passed:", export_folder.name)
 
 # Real GUI bug, confirmed live: a fixed-size display offset isn't
 # enough -- depth-buffer precision degrades with camera distance, so
