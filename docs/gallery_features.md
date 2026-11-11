@@ -1,6 +1,6 @@
 # Soundboard Lab Gallery — feature list
 
-Status: **planned, nothing built yet.** The data side exists: Results & Verification > Export Results writes self-describing experiment folders (layout and conventions: `src/soundboard_lab/experiment.py`, summary in `docs/CLAUDE.md` "Experiment export"). The gallery is a separate app that reads those folders; it never needs Blender.
+Status: **planned, nothing built yet.** The data side exists: Results & Verification > Export Results writes self-describing experiment folders (normative format spec: `docs/experiment_format.md`; writer: `src/soundboard_lab/experiment.py`; summary in `docs/CLAUDE.md` "Experiment export"). The gallery is a separate app that reads those folders; it never needs Blender.
 
 ## Architecture (agreed direction)
 
@@ -42,9 +42,9 @@ A modal-sum estimate from numbers already in the export; a rough estimate by des
 - **Peak labelling:** pick measured peaks, pair them with modelled modes and show the frequency deltas. A consistent offset points at material/boundary bias; a single mismatch points at one mode. This is also how damping and the air layer get calibrated on a real instrument.
 - Caveats: measured spectra include radiation and room effects (compare peak positions, levels only loosely); strung data includes string loading the model omits (unstrung is the cleaner comparison).
 
-## Data prerequisites (export changes needed first)
+## Data prerequisites
 
-- Per-mode net volume displacement `integral(phi dA)` in the manifest (for the sound view).
+- Done: per-mode net volume displacement (`modes[].displacement.net_volume`, `net_volume_ratio`; see [experiment_format.md](./experiment_format.md)) for the sound view. Exports made before this lack it.
 - Optional small thumbnails per image if the number of experiments grows large.
 - The drive/read positions are already in `inputs.json` (`mobility`) and per-vertex mode fields are in `fields.npz`, so a movable drive point needs nothing more.
 

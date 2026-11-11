@@ -175,6 +175,34 @@ def test_modes_are_sign_normalised_in_fields_images_and_hessian(tmp_path):
     assert fields["thickness"].shape == (81,) and fields["triangles"].shape[1] == 3
 
 
+def test_net_volume_displacement_is_exported_per_mode(tmp_path):
+    work = _synthetic_work_dir(tmp_path)
+    folder = write_experiment(work, tmp_path / "out", "vol", options=ExportOptions(displacement_images=False,
+                              energy_images=False, fields=False, solver_files=False))
+    manifest = json.loads((folder / "experiment.json").read_text())
+    m1, m2, m3 = (m["displacement"] for m in manifest["modes"])
+    # Mode 1 is sin(pi x/200) sin(pi y/150): integral = 200 * 150 * (2/pi)^2 (the 8x8 mesh underestimates it slightly).
+    assert m1["net_volume"] == pytest.approx(200 * 150 * (2 / np.pi) ** 2, rel=0.05)
+    assert m1["net_volume_ratio"] == pytest.approx(1.0)
+    # Modes 2 and 3 have an odd lobe pair: the net volume cancels while the gross does not.
+    assert abs(m2["net_volume"]) < 1e-6 * 3 * 200 * 150 and abs(m2["net_volume_ratio"]) < 1e-6
+    assert abs(m3["net_volume_ratio"]) < 1e-6
+    rows = list(csv.DictReader((folder / "modes.csv").open()))
+    assert float(rows[0]["net_volume"]) == m1["net_volume"] and float(rows[0]["net_volume_ratio"]) == 1.0
+    assert "net_volume" in manifest["conventions"]
+
+
+def test_net_volume_follows_the_sign_normalisation(tmp_path):
+    work = _synthetic_work_dir(tmp_path)
+    result = json.loads((work / "result.json").read_text())
+    result["mode_shapes"]["1"] = (-np.asarray(result["mode_shapes"]["1"])).tolist()  # solver sign flipped
+    (work / "result.json").write_text(json.dumps(result))
+    folder = write_experiment(work, tmp_path / "out", "vol", options=ExportOptions(displacement_images=False,
+                              energy_images=False, fields=False, solver_files=False))
+    m1 = json.loads((folder / "experiment.json").read_text())["modes"][0]["displacement"]
+    assert m1["sign_flipped"] is True and m1["net_volume"] > 0, "volume is reported in the exported sign convention"
+
+
 def test_mobility_phi_follows_the_same_sign_convention_as_the_images(tmp_path):
     work = _synthetic_work_dir(tmp_path)
     folder = write_experiment(work, tmp_path / "out", "phi", options=ExportOptions(displacement_images=False,
