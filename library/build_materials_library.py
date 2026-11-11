@@ -13,8 +13,10 @@ asset. Re-run this script (it overwrites the file) if the starter
 materials' field set or defaults change.
 """
 import sys
+from pathlib import Path
 
-sys.path.insert(0, r"C:\GlyphstoneCloud\CloudStation\LocalDev\gmode\addon")
+LIBRARY_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(LIBRARY_DIR.parent / "addon"))
 
 import bpy
 import soundboard_lab as addon
@@ -56,6 +58,6 @@ assert {"Spruce (Soundboard Lab Placeholder)", "Generic Isotropic (Bridge Plate 
     {m.name for m in bpy.data.materials}
 )
 
-out_path = r"C:\GlyphstoneCloud\CloudStation\LocalDev\gmode\library\materials_library.blend"
+out_path = str(LIBRARY_DIR / "materials_library.blend")
 bpy.ops.wm.save_as_mainfile(filepath=out_path)
 print(f"Wrote {out_path}")

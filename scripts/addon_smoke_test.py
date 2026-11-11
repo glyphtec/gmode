@@ -4,14 +4,15 @@ Run with: blender --background --python scripts\addon_smoke_test.py
 Not a pytest test (requires bpy / Blender runtime) - temporary dev script.
 """
 import sys
+from pathlib import Path
 
-sys.path.insert(0, r"C:\GlyphstoneCloud\CloudStation\LocalDev\gmode\addon")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "addon"))
 
 import bmesh
 import bpy
 from mathutils import Matrix
 import soundboard_lab as addon
-from pathlib import Path
 
 print("=== Soundboard Lab smoke test: register ===")
 addon.register()
@@ -298,14 +299,14 @@ import time
 
 obj.soundboard_lab.role = 'NONE'  # free up the sole-Soundboard slot temporarily
 bpy.ops.wm.stl_import(
-    filepath=r"C:\GlyphstoneCloud\CloudStation\LocalDev\gmode\tests\data\real_soundboard_with_neck_block_notch.stl"
+    filepath=str(REPO_ROOT / "tests" / "data" / "real_soundboard_with_neck_block_notch.stl")
 )
 fixture_obj = bpy.context.selected_objects[0]
 fixture_obj.soundboard_lab.role = 'SOUNDBOARD'
 fixture_obj.soundboard_lab.mesh_element_size = 15.0
 
 CCX_EXE = r"C:\Program Files\FreeCAD 1.1\bin\ccx.exe"
-ENGINE_PYTHON = r"C:\GlyphstoneCloud\CloudStation\LocalDev\gmode\.venv\Scripts\python.exe"
+ENGINE_PYTHON = str(REPO_ROOT / ".venv" / "Scripts" / "python.exe")
 
 assert addon.analysis.find_soundboard_object(bpy.context).name == fixture_obj.name
 
@@ -509,7 +510,7 @@ print("build_mode_shape_preview check passed")
 # --- Bond detection: generated collections, proxies, results, staleness ---
 # Real subprocess run on the bonding_exercise fixtures (ribs/bridge plate
 # sit on the soundboard within the 0.1 tolerance).
-BOND_DATA = Path(r"C:\GlyphstoneCloud\CloudStation\LocalDev\gmode\tests\data\bonding_exercise")
+BOND_DATA = REPO_ROOT / "tests" / "data" / "bonding_exercise"
 obj.soundboard_lab.role = 'NONE'
 bond_objs = {}
 for stem, role, element_size in (
