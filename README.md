@@ -2,6 +2,7 @@
 
 Blender add-on for luthier soundboard eigenmode experiments. See [docs/CLAUDE.md](docs/CLAUDE.md) for the full project context and decisions.
 
+Repository: <https://github.com/glyphtec/soundboard-lab>
 ## Engine dev setup
 
 ```powershell
