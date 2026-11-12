@@ -4,8 +4,9 @@ id = "soundboard_lab"
 version = "0.0.1"
 name = "Soundboard Lab"
 tagline = "Eigenmode analysis for luthier soundboard experiments"
-maintainer = "Soundboard Lab <noreply@example.com>"
+maintainer = "Breanna <breanna@glyphstone.net>"
 type = "add-on"
+website = "https://glyphstone.studio/projects/soundboard-lab"
 
 blender_version_min = "5.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
