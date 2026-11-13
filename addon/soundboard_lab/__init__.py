@@ -720,8 +720,11 @@ class SOUNDBOARD_PT_analysis(bpy.types.Panel):
                 layout.prop(obj.soundboard_lab, "attach_radius")
                 layout.label(text="Load applied and deflection read at the origin, snapped to the surface")
 
-        layout.operator(analysis.SOUNDBOARD_OT_analyze.bl_idname, icon='PLAY', text="GO!")
         status = context.scene.soundboard_lab_status
+        if analysis.is_solve_active():
+            layout.operator(analysis.SOUNDBOARD_OT_cancel.bl_idname, icon='CANCEL', text="CANCEL")
+        else:
+            layout.operator(analysis.SOUNDBOARD_OT_analyze.bl_idname, icon='PLAY', text="GO!")
         if status == 'RUNNING':
             # Not a numeric progress bar -- ccx itself is an opaque
             # subprocess call with no fine-grained progress available.
@@ -733,9 +736,21 @@ class SOUNDBOARD_PT_analysis(bpy.types.Panel):
                 text = step.label
                 if step.message:
                     text += f": {step.message}"
+                slow = False
+                if step.status == 'running':
+                    text += f" ({analysis.format_elapsed(step.elapsed)})"
+                    slow = analysis.is_step_slow(step.step_id, step.elapsed)
+                    if slow:
+                        icon = 'ERROR'
                 col.label(text=text, icon=icon)
+                if slow:
+                    col.label(text="Taking longer than usual - Cancel if it looks stuck")
         elif status == 'ERROR':
             layout.label(text=context.scene.soundboard_lab_message, icon='ERROR')
+        elif status == 'CANCELLED':
+            col = layout.column(align=True)
+            for i, line in enumerate(context.scene.soundboard_lab_message.split(" | ")):
+                col.label(text=line, icon='CANCEL' if i == 0 else 'BLANK1')
 
 
 class SOUNDBOARD_UL_mode_results(bpy.types.UIList):

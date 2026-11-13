@@ -331,6 +331,41 @@ print("Shell-path analysis result: status=ok, triangle_count=", result["triangle
 assert status is not None, "expected at least one non-None step-status read while the solve was in progress"
 assert {s["id"] for s in status["steps"]} == {"repair", "mesh", "write_input", "solve", "parse_results"}
 
+# Cancelling: the whole engine process tree must die, the report names the
+# running step, and the stack-dump summary points at the innermost frames.
+sample_dump = (
+    "Timeout (0:00:05)!\n"
+    "Thread 0x00001a84 (most recent call first):\n"
+    '  File "C:\\py\\site-packages\\pymeshfix\\_meshfix.py", line 123 in clean_from_arrays\n'
+    '  File "C:\\repo\\src\\soundboard_lab\\repair.py", line 208 in _repair_topology\n'
+    '  File "C:\\repo\\src\\soundboard_lab\\cli.py", line 621 in _main\n'
+    '  File "<frozen runpy>", line 88 in _run_code\n'
+    "\n"
+    "Thread 0x00000f00 (most recent call first):\n"
+    '  File "C:\\py\\Lib\\threading.py", line 355 in wait\n'
+)
+assert addon.analysis.summarize_stack_dump(sample_dump) == (
+    "clean_from_arrays (_meshfix.py:123) <- _repair_topology (repair.py:208)"
+)
+assert addon.analysis.summarize_stack_dump("") == ""
+assert addon.analysis.summarize_stack_dump("Timeout (0:00:05)!\nThread 0x1 (most recent call first):\n") == ""
+assert addon.analysis.format_elapsed(252) == "4:12"
+assert not addon.analysis.is_step_slow("repair", 30) and addon.analysis.is_step_slow("repair", 300)
+assert not addon.analysis.is_step_slow("solve", 300) and addon.analysis.is_step_slow("solve", 1000)
+
+cancel_handle = addon.analysis.start_solve(bpy.context, fixture_obj, CCX_EXE, ENGINE_PYTHON)
+for _ in range(120):  # wait for the engine to report its first running step
+    cancel_status = addon.analysis.read_solve_status(cancel_handle)
+    if cancel_status and any(s["status"] == "running" for s in cancel_status["steps"]):
+        break
+    time.sleep(0.25)
+cancelled = addon.analysis.cancel_solve(cancel_handle)
+assert cancel_handle["process"].poll() is not None, "cancel must stop the engine process"
+assert cancelled["message"].startswith("Cancelled during '"), cancelled
+assert cancelled["step_id"] is not None and cancelled["elapsed_s"] >= 0
+assert (cancel_handle["work_dir"] / "cancel_report.txt").is_file()
+print("Cancel report:", cancelled["message"])
+
 # _apply_result is what the real timer callback uses to populate scene
 # properties (poll_solve itself just returns the raw dict) -- verify
 # that wiring directly since the pipeline test above bypassed it.

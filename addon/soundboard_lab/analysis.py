@@ -17,8 +17,11 @@ needs bpy.app.timers, and that wrapper is intentionally minimal.
 import hashlib
 import json
 import math
+import re
 import subprocess
+import sys
 import tempfile
+import time
 import tomllib
 from datetime import datetime
 from pathlib import Path
@@ -440,6 +443,8 @@ def start_solve(
     stl_path = work_dir / f"{obj.name}.stl"
     output_json = work_dir / "result.json"
     status_json = work_dir / "status.json"
+    stack_log = work_dir / "stack.log"
+    engine_log = work_dir / "engine.log"
     export_triangulated_stl(context, obj, stl_path)
 
     cmd = [
@@ -454,6 +459,7 @@ def start_solve(
         "--boundary-condition", boundary_condition,
         "--num-layers", str(num_layers),
         "--status-json", str(status_json),
+        "--stack-log", str(stack_log),
     ]
     if settings.mesh_thickness_hint > 0:
         cmd += ["--thickness-hint", str(settings.mesh_thickness_hint)]
@@ -524,11 +530,17 @@ def start_solve(
     }
     (work_dir / "inputs.json").write_text(json.dumps(inputs, indent=2, default=str))
 
-    process =  subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # Output goes to a file, not a pipe: nothing reads a pipe until the engine
+    # exits, so a chatty gmsh/ccx run could fill the OS pipe buffer and block.
+    with open(engine_log, "w", encoding="utf-8") as log:
+        process = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
     return {
         "process": process,
         "output_json": output_json,
         "status_json": status_json,
+        "stack_log": stack_log,
+        "log_path": engine_log,
+        "started_at": time.time(),
         "work_dir": work_dir,
         "object_name": obj.name,
     }
@@ -569,12 +581,126 @@ def poll_solve(handle: dict) -> dict | None:
 
     output_json: Path = handle["output_json"]
     if not output_json.is_file():
-        stdout, stderr = process.communicate()
+        log_path = handle.get("log_path")
+        if log_path is not None:
+            output = f"log tail={_read_tail(log_path)!r}"
+        else:
+            stdout, stderr = process.communicate()
+            output = f"stdout={stdout!r} stderr={stderr!r}"
         raise SoundboardLabSceneError(
-            f"Engine subprocess exited (code {process.returncode}) without writing a result: "
-            f"stdout={stdout!r} stderr={stderr!r}"
+            f"Engine subprocess exited (code {process.returncode}) without writing a result: {output}"
         )
     return json.loads(output_json.read_text())
+
+
+def _read_tail(path: Path, max_chars: int = 2000) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")[-max_chars:]
+    except OSError:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Cancelling a stuck run, and saying where it was stuck
+# ---------------------------------------------------------------------------
+
+# How long a step may run before the panel flags it as "longer than usual"
+# (informational only -- nothing is ever killed automatically).
+SLOW_STEP_THRESHOLD_S = {"solve": 900, "static": 900}
+DEFAULT_SLOW_STEP_THRESHOLD_S = 120
+
+_STACK_FRAME_RE = re.compile(r'File "(?P<file>[^"]+)", line (?P<line>\d+) in (?P<func>\S+)')
+
+
+def format_elapsed(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def is_step_slow(step_id: str, elapsed_s: float) -> bool:
+    return elapsed_s > SLOW_STEP_THRESHOLD_S.get(step_id, DEFAULT_SLOW_STEP_THRESHOLD_S)
+
+
+def summarize_stack_dump(text: str, max_frames: int = 2) -> str:
+    """Where the engine's main thread was, from the newest complete
+    faulthandler dump in `text` (see cli.py's --stack-log): the innermost
+    `max_frames` frames as 'func (file.py:line)', e.g.
+    'clean_from_arrays (_meshfix.py:123) <- _repair_topology (repair.py:208)'.
+    Empty string if no usable dump exists yet (the engine dumps every few
+    seconds, so a run killed in its first moments has none).
+    """
+    for dump in reversed(text.split("Timeout (")):
+        threads = re.split(r"\n\s*\n|(?=^(?:Current thread|Thread) 0x)", dump, flags=re.MULTILINE)
+        blocks = [t for t in threads if _STACK_FRAME_RE.search(t)]
+        # The engine runs as `python -m soundboard_lab.cli`, so the main
+        # thread is the one whose outermost frame is runpy / the CLI module.
+        main = [t for t in blocks if "runpy" in t or "soundboard_lab" in t and "cli.py" in t]
+        chosen = (main or blocks[-1:] or [None])[-1]
+        if chosen is None:
+            continue
+        frames = list(_STACK_FRAME_RE.finditer(chosen))[:max_frames]
+        return " <- ".join(f"{m['func']} ({Path(m['file']).name}:{m['line']})" for m in frames)
+    return ""
+
+
+def _kill_process_tree(process: subprocess.Popen) -> None:
+    """Kill the engine and everything it spawned. The engine launches
+    ccx.exe itself, and Windows doesn't kill children with the parent, so a
+    plain `process.kill()` would leave an orphaned solver running."""
+    if process.poll() is not None:
+        return
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    else:
+        process.kill()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+
+
+def cancel_solve(handle: dict) -> dict:
+    """Kill a running solve (whole process tree) and work out where it was.
+    Returns {"message", "step_id", "elapsed_s", "where"}; `message` is the
+    ' | '-separated text shown in the status bar and panel. Also writes
+    `cancel_report.txt` (with the raw last stack dump) to the work dir.
+    """
+    status = read_solve_status(handle) or {}
+    running = next((s for s in status.get("steps", []) if s.get("status") == "running"), None)
+    started = (running or {}).get("started_at") or handle.get("started_at") or time.time()
+    elapsed_s = time.time() - started
+    stack_text = _read_tail(handle["stack_log"], max_chars=20000) if handle.get("stack_log") else ""
+    where = summarize_stack_dump(stack_text)
+
+    _kill_process_tree(handle["process"])
+
+    if running is not None:
+        message = f"Cancelled during '{running.get('label', running.get('id'))}' after {format_elapsed(elapsed_s)}"
+    else:
+        message = f"Cancelled before the first step started ({format_elapsed(elapsed_s)} in)"
+    if where:
+        message += f" | stuck in {where}"
+    elif running is not None:
+        message += " | no stack sample yet"
+
+    try:
+        report = [message.replace(" | ", "\n"), "", "--- last stack dump ---", stack_text[-4000:] or "(none)"]
+        engine_log = _read_tail(handle["log_path"]) if handle.get("log_path") else ""
+        report += ["", "--- engine log tail ---", engine_log or "(empty)"]
+        (Path(handle["work_dir"]) / "cancel_report.txt").write_text("\n".join(report), encoding="utf-8")
+    except OSError as exc:
+        print(f"Soundboard Lab: couldn't write cancel_report.txt (non-fatal): {exc!r}")
+    print(f"Soundboard Lab: {message}\n  details: {Path(handle['work_dir']) / 'cancel_report.txt'}")
+    return {
+        "message": message,
+        "step_id": (running or {}).get("id"),
+        "elapsed_s": elapsed_s,
+        "where": where,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -888,6 +1014,9 @@ class SoundboardLabStepStatus(bpy.types.PropertyGroup):
     label: bpy.props.StringProperty(name="Step")
     status: bpy.props.StringProperty(name="Status")  # 'pending' | 'running' | 'done' | 'error'
     message: bpy.props.StringProperty(name="Message")
+    # Seconds the step has been running, refreshed on every poll tick (not
+    # an epoch timestamp: Blender float properties are 32-bit).
+    elapsed: bpy.props.FloatProperty(name="Elapsed (s)")
 
 
 def _tag_ui_redraw():
@@ -949,6 +1078,8 @@ def _update_step_status(scene, status: dict) -> None:
         item.label = step.get("label", "")
         item.status = step.get("status", "pending")
         item.message = step.get("message", "")
+        started_at = step.get("started_at")
+        item.elapsed = time.time() - started_at if started_at and item.status == "running" else 0.0
 
 
 def _apply_result(scene, result: dict) -> None:
@@ -1177,11 +1308,44 @@ class SOUNDBOARD_OT_analyze(bpy.types.Operator):
         context.scene.soundboard_lab_message = ""
         context.scene.soundboard_lab_results.clear()
         context.scene.soundboard_lab_steps.clear()
-        bpy.app.timers.register(_poll_timer, first_interval=0.5)
+        if not bpy.app.timers.is_registered(_poll_timer):
+            bpy.app.timers.register(_poll_timer, first_interval=0.5)
         if excluded:
             self.report({'WARNING'}, f"Not bonded, left out of the solve: {', '.join(excluded)}")
         else:
             self.report({'INFO'}, f"Soundboard Lab: solving '{obj.name}' + {len(bonded_bodies)} bonded bodies...")
+        return {'FINISHED'}
+
+
+def is_solve_active() -> bool:
+    return _active_handle is not None
+
+
+class SOUNDBOARD_OT_cancel(bpy.types.Operator):
+    bl_idname = "soundboard.cancel"
+    bl_label = "Cancel"
+    bl_description = (
+        "Stop the running analysis (the engine and any solver it started) and report which step "
+        "it was in and, where known, where it was stuck"
+    )
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_handle is not None
+
+    def execute(self, context):
+        global _active_handle
+        handle = _active_handle
+        _active_handle = None
+        if bpy.app.timers.is_registered(_poll_timer):
+            bpy.app.timers.unregister(_poll_timer)
+        report = cancel_solve(handle)
+        context.scene.soundboard_lab_status = 'CANCELLED'
+        context.scene.soundboard_lab_message = report["message"]
+        context.scene.soundboard_lab_steps.clear()
+        self.report({'WARNING'}, report["message"].replace(" | ", " - "))
+        _tag_ui_redraw()
         return {'FINISHED'}
 
 
@@ -1195,6 +1359,7 @@ classes = (
     SoundboardLabMobilityResult,
     SoundboardLabStepStatus,
     SOUNDBOARD_OT_analyze,
+    SOUNDBOARD_OT_cancel,
 )
 
 
@@ -1260,6 +1425,7 @@ def register():
             ('RUNNING', "Running", "Engine subprocess in progress"),
             ('DONE', "Done", "Solve completed successfully"),
             ('ERROR', "Error", "Solve failed"),
+            ('CANCELLED', "Cancelled", "Solve cancelled by the user"),
         ],
         default='IDLE',
     )

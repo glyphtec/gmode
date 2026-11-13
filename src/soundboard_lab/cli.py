@@ -26,8 +26,10 @@ per-step error message is both honest and actually useful).
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -62,6 +64,7 @@ from soundboard_lab.solver import (
 )
 
 MIN_THROUGH_THICKNESS_LAYERS = 2
+STACK_DUMP_INTERVAL_S = 5
 
 SHELL_PIPELINE_STEPS = [
     ("repair", "Repair mesh"),
@@ -112,6 +115,9 @@ class StepTracker:
 
     def start(self, step_id: str) -> None:
         self.steps[step_id]["status"] = "running"
+        # Wall-clock epoch seconds: lets the addon show elapsed time per step
+        # and say which step was running if the user cancels a hung run.
+        self.steps[step_id]["started_at"] = time.time()
         self._write()
 
     def done(self, step_id: str, message: str = "") -> None:
@@ -496,6 +502,15 @@ def load_bridge_probe(spec: dict) -> tuple[BridgeProbe, int | None]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    finally:
+        # Matters when main() is called in-process (tests) rather than as the
+        # process's whole life: stop the periodic stack dump.
+        faulthandler.cancel_dump_traceback_later()
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stl", required=True, type=Path)
     parser.add_argument("--ccx-exe", required=True, type=Path)
@@ -512,6 +527,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--num-layers", type=int, default=3)
     parser.add_argument("--status-json", type=Path, default=None)
+    parser.add_argument(
+        "--stack-log",
+        type=Path,
+        default=None,
+        help=(
+            "Periodically dump every thread's Python stack here (faulthandler), so a hung run can be "
+            "diagnosed after it is killed -- works even while stuck inside a C extension"
+        ),
+    )
     parser.add_argument(
         "--bodies-json",
         type=Path,
@@ -555,6 +579,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    if args.stack_log is not None:
+        # The file is left open on purpose: faulthandler writes to it from a
+        # watchdog thread until the process ends (or main() cancels the dump).
+        faulthandler.dump_traceback_later(STACK_DUMP_INTERVAL_S, repeat=True, file=args.stack_log.open("w"))
 
     try:
         material = SPRUCE_PLACEHOLDER
