@@ -46,6 +46,7 @@ class RepairReport:
     repaired_face_count: int
     components_removed: int
     cap_triangles_flipped: int = 0
+    caps_retriangulated: int = 0
 
 
 def diagnose(mesh: trimesh.Trimesh) -> list[str]:
@@ -177,15 +178,45 @@ def flip_cap_triangles(
 
 def repair_mesh(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np.ndarray, RepairReport]:
     """Diagnose and, if needed, repair a triangulated surface into a
-    single watertight solid, then flip coplanar cap triangles (see
-    `flip_cap_triangles`). Raises `MeshRepairError` if the result
-    still isn't valid afterward.
+    single watertight solid, then re-triangulate any flat cap whose
+    triangulation overlaps itself (`retriangulate_flat_caps`) and flip
+    coplanar cap triangles (`flip_cap_triangles`). Raises
+    `MeshRepairError` if the result still isn't valid afterward.
     """
     v_out, f_out, report = _repair_topology(vertices, faces)
+    film = find_zero_thickness_film(v_out, f_out)
+    if film is not None:
+        film_area, film_z, (x0, y0, x1, y1) = film
+        raise MeshRepairError(
+            f"The model has a zero-thickness film: {film_area:.0f} mm^2 of upward-facing surface lies "
+            f"exactly on top of downward-facing surface at Z = {film_z:.3f} (X {x0:.0f}..{x1:.0f}, "
+            f"Y {y0:.0f}..{y1:.0f}). That is not a valid solid and cannot be meshed. It usually comes from "
+            "a pocket or cut made exactly flush with a face: make the cut go slightly past that face "
+            "(to leave a through-hole) or stop short of it (to leave real material), then re-run."
+        )
+    v_out, f_out, n_caps = retriangulate_flat_caps(v_out, f_out)
+    if n_caps:
+        report = RepairReport(
+            **{
+                **report.__dict__,
+                "was_already_valid": False,
+                "problems_found": [
+                    *report.problems_found,
+                    f"{n_caps} flat cap(s) with overlapping or inverted triangles (re-triangulated)",
+                ],
+                "caps_retriangulated": n_caps,
+            }
+        )
     f_out, flips = flip_cap_triangles(v_out, f_out)
     if flips:
         report = RepairReport(**{**report.__dict__, "cap_triangles_flipped": flips})
     return v_out, f_out, report
+
+
+# MeshFix may only add surface (filling holes) or drop slivers; losing more
+# than this fraction of the surface area means it threw real geometry away
+# (seen: 58% of a waffle stiffener's volume deleted, with no error).
+MAX_REPAIR_AREA_LOSS = 0.05
 
 
 def _repair_topology(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np.ndarray, RepairReport]:
@@ -206,7 +237,27 @@ def _repair_topology(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarra
             ),
         )
 
-    original_components = len(mesh.split(only_watertight=False))
+    components = mesh.split(only_watertight=False)
+    original_components = len(components)
+    if original_components > 1:
+        # Drop disconnected debris (e.g. zero-thickness slivers left by a
+        # botched boolean) ourselves, first: if what remains is a valid
+        # solid, MeshFix never has to touch it.
+        mesh = max(components, key=lambda c: float(c.area))
+        if not diagnose(mesh):
+            return (
+                np.asarray(mesh.vertices),
+                np.asarray(mesh.faces),
+                RepairReport(
+                    was_already_valid=False,
+                    problems_found=problems,
+                    original_face_count=original_face_count,
+                    repaired_face_count=len(mesh.faces),
+                    components_removed=original_components - 1,
+                ),
+            )
+
+    area_before = float(mesh.area)
     v_clean, f_clean = pymeshfix.clean_from_arrays(
         np.asarray(mesh.vertices, dtype=np.float64),
         np.asarray(mesh.faces, dtype=np.int32),
@@ -218,6 +269,14 @@ def _repair_topology(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarra
             f"Mesh could not be repaired to a valid watertight solid: "
             f"{'; '.join(remaining_problems)} (found before repair: {'; '.join(problems)})"
         )
+    if float(repaired.area) < (1.0 - MAX_REPAIR_AREA_LOSS) * area_before:
+        raise MeshRepairError(
+            f"Automatic repair would have discarded {100 * (1 - repaired.area / area_before):.0f}% of the "
+            f"model's surface ({original_face_count} -> {len(repaired.faces)} faces), which means it "
+            "deleted real geometry rather than fixing defects. Fix the model instead -- e.g. remove "
+            "self-intersections / overlapping or doubled faces, and make the solid a single closed "
+            f"manifold shape (found before repair: {'; '.join(problems)})"
+        )
 
     repaired_components = len(repaired.split(only_watertight=False))
     report = RepairReport(
@@ -228,6 +287,327 @@ def _repair_topology(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarra
         components_removed=max(0, original_components - repaired_components),
     )
     return np.asarray(repaired.vertices), np.asarray(repaired.faces), report
+
+
+def _boundary_loops(directed_edges: np.ndarray, xy: np.ndarray, region_on_left: bool) -> list[list[int]] | None:
+    """Closed vertex loops from a region's directed boundary edges (each
+    edge directed as the region's own winding has it, so the region lies
+    on one fixed side). Where two loops touch at a pinch vertex, the
+    walk takes the tightest turn toward the region, which splits them
+    into separate simple loops rather than one tangled one. None if the
+    edges don't close up."""
+    out: dict[int, list[int]] = {}
+    remaining = set()
+    for a, b in directed_edges.tolist():
+        out.setdefault(a, []).append(b)
+        remaining.add((a, b))
+
+    def turn(a: int, b: int, c: int) -> float:
+        back = np.arctan2(xy[a, 1] - xy[b, 1], xy[a, 0] - xy[b, 0])
+        onward = np.arctan2(xy[c, 1] - xy[b, 1], xy[c, 0] - xy[b, 0])
+        rotation = (back - onward) if region_on_left else (onward - back)
+        return float(rotation % (2 * np.pi)) or 2 * np.pi
+
+    loops = []
+    while remaining:
+        start = min(remaining)
+        remaining.discard(start)
+        loop, edge = [start[0]], start
+        while True:
+            a, b = edge
+            candidates = [(b, c) for c in out.get(b, ()) if (b, c) in remaining or (b, c) == start]
+            if not candidates:
+                return None
+            nxt = min(candidates, key=lambda e: turn(a, b, e[1]))
+            if nxt == start:
+                break
+            loop.append(b)
+            remaining.discard(nxt)
+            edge = nxt
+        if len(loop) < 3:
+            return None
+        loops.append(loop)
+    return loops
+
+
+def _signed_area_xy(xy: np.ndarray) -> float:
+    return 0.5 * float(np.sum(xy[:, 0] * np.roll(xy[:, 1], -1) - np.roll(xy[:, 0], -1) * xy[:, 1]))
+
+
+def _point_in_polygon(point: np.ndarray, polygon: np.ndarray) -> bool:
+    x, y = point
+    x1, y1 = polygon[:, 0], polygon[:, 1]
+    x2, y2 = np.roll(x1, -1), np.roll(y1, -1)
+    straddles = (y1 > y) != (y2 > y)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        x_cross = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+    return bool(np.count_nonzero(straddles & (x < x_cross)) % 2)
+
+
+def _triangulate_region(
+    v: np.ndarray, loops: list[list[int]], depths: list[int], parents: list[int | None]
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Fresh 2D triangulation of the planar region bounded by `loops`
+    (even depth = outer boundary or island, odd = hole), reusing the
+    loops' own vertices so the cap still meets the side walls exactly.
+    Returns (new_points, triangles) with triangle indices into
+    `[v..., new_points...]`, or None if gmsh can't do it."""
+    import gmsh
+
+    big = 10.0 * float(np.ptp(v, axis=0).max())
+    z_mid = float(np.median(v[np.concatenate(loops), 2]))
+    point_tag: dict[int, int] = {}
+    gmsh.initialize()
+    try:
+        gmsh.option.setNumber("General.Terminal", 0)
+        gmsh.model.add("flat_cap")
+
+        def loop_tag(loop: list[int]) -> int:
+            tags = []
+            for vi in loop:
+                if vi not in point_tag:  # loops that touch at a pinch vertex share its point
+                    point_tag[vi] = gmsh.model.geo.addPoint(v[vi, 0], v[vi, 1], 0.0, big)
+                tags.append(point_tag[vi])
+            lines = [gmsh.model.geo.addLine(tags[i], tags[(i + 1) % len(tags)]) for i in range(len(tags))]
+            return gmsh.model.geo.addCurveLoop(lines)
+
+        tags = [loop_tag(loop) for loop in loops]
+        for i, depth in enumerate(depths):
+            if depth % 2 == 0:
+                holes = [tags[j] for j in range(len(loops)) if parents[j] == i]
+                gmsh.model.geo.addPlaneSurface([tags[i], *holes])
+        gmsh.model.geo.synchronize()
+        gmsh.model.mesh.generate(2)
+
+        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
+        coords = np.asarray(node_coords, dtype=np.float64).reshape(-1, 3)
+        node_to_row = {int(t): i for i, t in enumerate(node_tags)}
+        original_row = {}
+        for vi, ptag in point_tag.items():
+            tags_at_point, _, _ = gmsh.model.mesh.getNodes(0, ptag)
+            original_row[node_to_row[int(tags_at_point[0])]] = vi
+        elem_types, _, elem_nodes = gmsh.model.mesh.getElements(dim=2)
+        tris = [np.asarray(n, dtype=np.int64).reshape(-1, 3) for t, n in zip(elem_types, elem_nodes) if t == 2]
+    except Exception:
+        return None
+    finally:
+        gmsh.finalize()
+    if not tris:
+        return None
+    tris = np.vstack(tris)
+    tri_rows = np.vectorize(node_to_row.get)(tris)
+
+    new_rows = [r for r in range(len(coords)) if r not in original_row]
+    new_index = {r: len(v) + i for i, r in enumerate(new_rows)}
+    mapping = {**original_row, **new_index}
+    new_points = np.column_stack([coords[new_rows, :2], np.full(len(new_rows), z_mid)]) if new_rows else np.zeros((0, 3))
+    return new_points, np.vectorize(mapping.get)(tri_rows)
+
+
+# A cap triangle facing against the cap's outward direction (an inverted
+# fold) bigger than this fraction of the cap's area gets the cap rebuilt;
+# smaller is float noise on a sliver.
+INVERTED_AREA_TOL = 1e-5
+
+# Coincident opposite-facing flat sheets (zero-thickness film) smaller than
+# this share of the total surface are ignored: tiny reversed-winding duplicate
+# slivers from botched booleans are known, harmless, and already handled
+# downstream.
+FILM_AREA_FRACTION = 0.005
+
+
+def find_zero_thickness_film(
+    vertices: np.ndarray, faces: np.ndarray, plane_tol: float = 1e-4
+) -> tuple[float, float, np.ndarray] | None:
+    """Horizontal sheets with no thickness: an up-facing flat triangle
+    lying (within `plane_tol` x model size) on top of a down-facing one.
+    A solid can't have its inside on both sides of a plane, so these are
+    zero-thickness films, typically a pocket cut exactly flush with the
+    underside by a boolean. They are valid topology (trimesh and MeshFix
+    accept them) but gmsh rejects them as "overlapping facets".
+
+    Returns (film area, Z, [xmin, ymin, xmax, ymax]) for the largest film
+    if it's a meaningful part of the surface, else None.
+    """
+    from rtree import index
+
+    v = np.asarray(vertices, dtype=np.float64)
+    f = np.asarray(faces, dtype=np.int64)
+    tol = plane_tol * max(float(np.ptp(v, axis=0).max()), 1.0)
+    tri = v[f]
+    flat = np.ptp(tri[:, :, 2], axis=1) <= tol
+    cross_z = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])[:, 2]
+    area = 0.5 * np.abs(cross_z)
+    up = np.nonzero(flat & (cross_z > 0))[0]
+    down = np.nonzero(flat & (cross_z < 0))[0]
+    if len(up) == 0 or len(down) == 0:
+        return None
+
+    xy = tri[:, :, :2]
+    z = tri[:, :, 2].mean(axis=1)
+    tree = index.Index(properties=index.Property(dimension=2))
+    for i in down:
+        tree.insert(int(i), (*xy[i].min(axis=0), *xy[i].max(axis=0)))
+
+    def inside(p: np.ndarray, t: np.ndarray) -> bool:
+        a, b, c = t
+        d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1])
+        if d == 0:
+            return False
+        l1 = ((b[1] - c[1]) * (p[0] - c[0]) + (c[0] - b[0]) * (p[1] - c[1])) / d
+        l2 = ((c[1] - a[1]) * (p[0] - c[0]) + (a[0] - c[0]) * (p[1] - c[1])) / d
+        return l1 > 0 and l2 > 0 and l1 + l2 < 1
+
+    film = []
+    for i in up:
+        centre = xy[i].mean(axis=0)
+        for j in tree.intersection((*centre, *centre)):
+            if abs(z[i] - z[j]) <= tol and inside(centre, xy[j]):
+                film.append(i)
+                break
+    if not film:
+        return None
+    film_area = float(area[film].sum())
+    total_area = 0.5 * float(np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1).sum())
+    if film_area < FILM_AREA_FRACTION * total_area:
+        return None
+    points = xy[film].reshape(-1, 2)
+    return film_area, float(z[film].mean()), np.concatenate([points.min(axis=0), points.max(axis=0)])
+
+
+def retriangulate_flat_caps(
+    vertices: np.ndarray, faces: np.ndarray, plane_tol: float = 1e-4, area_tol: float = 1e-3
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Re-triangulate horizontal (constant-Z) flat regions whose own
+    triangulation is self-inconsistent, e.g. a top or bottom cap where
+    Blender's n-gon fill left inverted, overlapping triangles. Such a
+    mesh is still topologically watertight (and trimesh calls it valid),
+    but two boundary facets overlap, which gmsh rejects with "Invalid
+    boundary mesh (overlapping facets)" when it builds the volume.
+
+    A region is "inconsistent" when its triangles' total area differs
+    from the area of the polygon its boundary loops enclose (outer minus
+    holes): in a clean cap they are equal. The boundary loops (taken
+    where the region meets the side walls) don't depend on the cap's own
+    triangulation, so the cap is replaced by a fresh 2D triangulation of
+    them; the side walls and the watertightness are untouched. Consistent
+    caps, regions with non-manifold or pinched boundaries, and non-flat
+    surfaces are left alone. Horizontal only, matching the world-Z thin
+    axis the rest of the pipeline assumes.
+
+    Returns (vertices, faces, number of caps re-triangulated).
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    v = np.asarray(vertices, dtype=np.float64)
+    f = np.asarray(faces, dtype=np.int64)
+    if len(f) == 0:
+        return v, f, 0
+    tol = plane_tol * max(float(np.ptp(v, axis=0).max()), 1.0)
+    face_z = v[f][:, :, 2]
+    flat = np.nonzero(np.ptp(face_z, axis=1) <= tol)[0]
+    if len(flat) < 2:
+        return v, f, 0
+
+    edges = np.sort(f[:, [[0, 1], [1, 2], [2, 0]]], axis=2).reshape(-1, 2)
+    unique_edges, edge_id = np.unique(edges, axis=0, return_inverse=True)
+    edge_id = edge_id.reshape(-1, 3)
+    edge_total = np.bincount(edge_id.ravel(), minlength=len(unique_edges))
+
+    # Flat faces sharing an edge and the same Z level form one region.
+    z_mean = face_z.mean(axis=1)
+    local = {int(face): i for i, face in enumerate(flat)}
+    rows, cols = [], []
+    owners: dict[int, int] = {}
+    for face in flat:
+        for e in edge_id[face]:
+            other = owners.setdefault(int(e), int(face))
+            if other != face and abs(z_mean[other] - z_mean[face]) <= tol:
+                rows.append(local[other])
+                cols.append(local[int(face)])
+    graph = coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(len(flat), len(flat)))
+    n_regions, label = connected_components(graph, directed=False)
+
+    drop = np.zeros(len(f), dtype=bool)
+    new_faces: list[np.ndarray] = []
+    new_points: list[np.ndarray] = []
+    next_vertex = len(v)
+    count = 0
+    for region in range(n_regions):
+        members = flat[label == region]
+        if len(members) < 2:
+            continue
+        in_region = np.zeros(len(f), dtype=bool)
+        in_region[members] = True
+        region_count = np.bincount(edge_id[in_region].ravel(), minlength=len(unique_edges))
+        touched = region_count > 0
+        if np.any(edge_total[touched] != 2):
+            continue
+        boundary_mask = region_count[edge_id[members]] == 1
+        directed = f[members][:, [[0, 1], [1, 2], [2, 0]]][boundary_mask]
+        if len(directed) == 0:
+            continue
+        net_boundary_area = 0.5 * float(
+            np.sum(v[directed[:, 0], 0] * v[directed[:, 1], 1] - v[directed[:, 1], 0] * v[directed[:, 0], 1])
+        )
+        loops = _boundary_loops(directed, v[:, :2], region_on_left=net_boundary_area > 0)
+        if not loops:
+            continue
+
+        xy_loops = [v[loop, :2] for loop in loops]
+        areas = [abs(_signed_area_xy(xy)) for xy in xy_loops]
+        depths, parents = [], []
+        for i, loop in enumerate(loops):
+            others = set().union(*(set(other) for j, other in enumerate(loops) if j != i))
+            probe = next((vi for vi in loop if vi not in others), loop[0])
+            containing = [j for j in range(len(loops)) if j != i and _point_in_polygon(v[probe, :2], xy_loops[j])]
+            depths.append(len(containing))
+            parents.append(min(containing, key=lambda j: areas[j]) if containing else None)
+        polygon_area = sum(a if d % 2 == 0 else -a for a, d in zip(areas, depths))
+
+        tri_xy = v[f[members]][:, :, :2]
+        signed = 0.5 * (
+            (tri_xy[:, 1, 0] - tri_xy[:, 0, 0]) * (tri_xy[:, 2, 1] - tri_xy[:, 0, 1])
+            - (tri_xy[:, 2, 0] - tri_xy[:, 0, 0]) * (tri_xy[:, 1, 1] - tri_xy[:, 0, 1])
+        )
+        neg_area = float(np.abs(signed[(signed < 0) == (net_boundary_area > 0)]).sum())
+        mismatch = abs(float(np.abs(signed).sum()) - polygon_area) > area_tol * polygon_area
+        if polygon_area <= 0 or not (mismatch or neg_area > INVERTED_AREA_TOL * polygon_area):
+            continue
+
+        result = _triangulate_region(v, loops, depths, parents)
+        if result is None:
+            continue
+        points, triangles = result
+        points = np.asarray(points)
+        all_xy = np.vstack([v[:, :2], points[:, :2]]) if len(points) else v[:, :2]
+        a, b, c = all_xy[triangles[:, 0]], all_xy[triangles[:, 1]], all_xy[triangles[:, 2]]
+        tri_signed = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1])
+        # Outward direction comes from the boundary edges' own direction (set
+        # by the intact side walls): a bottom cap faces -Z, so its triangles
+        # wind clockwise seen from above.
+        want_up = net_boundary_area > 0
+        flip = (tri_signed < 0) == want_up
+        triangles[flip] = triangles[flip][:, [0, 2, 1]]
+
+        # New triangle indices >= len(v) refer to this region's new points.
+        triangles = np.where(triangles >= len(v), triangles - len(v) + next_vertex, triangles)
+        next_vertex += len(points)
+        new_points.append(points)
+        new_faces.append(triangles)
+        drop[members] = True
+        count += 1
+
+    if not count:
+        return v, f, 0
+
+    v_out = np.vstack([v, *new_points]) if new_points else v
+    f_out = np.vstack([f[~drop], *new_faces])
+    used = np.unique(f_out)
+    remap = np.full(len(v_out), -1, dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    return v_out[used], remap[f_out], count
 
 
 def repair_stl(stl_path: Path, repaired_stl_path: Path) -> RepairReport:
