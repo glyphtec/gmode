@@ -51,6 +51,8 @@ bits you missed outside the final perimeter:
 ## What Soundboard Lab repairs for you, and what it won't
 
 It automatically removes stray disconnected fragments, rebuilds flat caps whose
-triangles overlap or are inverted, and fills small holes. It refuses to continue,
-with a message, if a "repair" would delete real geometry, so you never get an
-answer for a shape you didn't build.
+triangles overlap or are inverted, removes zero-thickness films (they become
+through-holes), collapses tiny self-crossings where a closed outline overshoots its
+start, and fills small holes. It refuses to continue, with a message, if a "repair"
+would delete real geometry, so you never get an answer for a shape you didn't build.
+The repair report in the result says what was changed.

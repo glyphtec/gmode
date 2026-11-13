@@ -241,13 +241,23 @@ def _ring_with_pocket_film():
     return mesh
 
 
-def test_zero_thickness_film_is_reported_clearly():
+def test_zero_thickness_film_is_removed_as_a_through_hole(tmp_path):
     film = _ring_with_pocket_film()
     assert film.is_watertight and film.is_winding_consistent
     assert diagnose(film) == []
+    assert find_zero_thickness_film(film.vertices, film.faces) is not None
 
-    with pytest.raises(MeshRepairError, match="zero-thickness film"):
-        repair_mesh(film.vertices, film.faces)
+    vertices, faces, report = repair_mesh(film.vertices, film.faces)
+    assert np.isclose(report.film_area_removed, 100.0)
+    repaired = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    assert repaired.is_watertight and repaired.is_winding_consistent
+    assert find_zero_thickness_film(vertices, faces) is None
+    assert np.isclose(repaired.volume, 20 * 20 * 10 - 10 * 10 * 10)  # the film had no volume
+
+    stl = tmp_path / "pocket.stl"
+    repaired.export(stl)
+    mesh = mesh_surface(stl, element_size=3.0)
+    assert next(c.data.shape[0] for c in mesh.cells if c.type == "tetra10") > 1
 
 
 def test_ordinary_box_has_no_film():
@@ -287,14 +297,34 @@ def test_debris_removal_does_not_run_meshfix(monkeypatch):
     assert np.isclose(trimesh.Trimesh(out_v, out_f, process=False).volume, 1000.0)
 
 
-def test_real_waffle_stiffener_diagnosis():
+def test_real_waffle_stiffener_with_films_and_debris():
     """luna_waffle_stiffener1.stl: six zero-volume debris slivers that once
     made MeshFix delete 58% of the stiffener, plus pocket floors lying on
-    the underside (zero-thickness film)."""
+    the underside (zero-thickness film) from the lining-trim step."""
     mesh = trimesh.load(DATA_DIR / "luna_waffle_stiffener1.stl", process=True)
     vertices, faces, report = _repair_topology(mesh.vertices, mesh.faces)
     assert report.components_removed == 6
     assert np.isclose(trimesh.Trimesh(vertices, faces, process=False).volume, 137661.8, rtol=1e-4)
-    with pytest.raises(MeshRepairError, match="zero-thickness film"):
-        repair_mesh(mesh.vertices, mesh.faces)
+
+    vertices, faces, report = repair_mesh(mesh.vertices, mesh.faces)
+    assert np.isclose(report.film_area_removed, 16202, rtol=1e-3)
+    repaired = trimesh.Trimesh(vertices, faces, process=False)
+    assert repaired.is_watertight and repaired.is_winding_consistent
+    assert find_zero_thickness_film(vertices, faces) is None
+    assert np.isclose(repaired.volume, 137661.8, rtol=1e-3)
+
+
+def test_untrimmed_waffle_stiffener_repairs_and_meshes(tmp_path):
+    """luna_waffle_stiffener_untrimmed.stl: debris, a tiny film, inverted cap
+    triangles and a 0.23 mm self-crossing where the outline's closing seam
+    overshoots. Once repaired it must mesh, with the volume untouched."""
+    report = repair_stl(DATA_DIR / "luna_waffle_stiffener_untrimmed.stl", tmp_path / "fixed.stl")
+    assert report.components_removed == 4
+    assert report.seam_crossings_collapsed == 2  # the same twist at the top and the bottom rim
+    assert report.film_area_removed > 0 and report.caps_retriangulated == 2
+    fixed = trimesh.load(tmp_path / "fixed.stl", process=True)
+    assert fixed.is_watertight and fixed.is_winding_consistent
+    assert np.isclose(fixed.volume, 184038.9, rtol=1e-4)
+    mesh = mesh_surface(tmp_path / "fixed.stl", element_size=4.0)
+    assert next(c.data.shape[0] for c in mesh.cells if c.type == "tetra10") > 1000
 

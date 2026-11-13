@@ -47,6 +47,8 @@ class RepairReport:
     components_removed: int
     cap_triangles_flipped: int = 0
     caps_retriangulated: int = 0
+    film_area_removed: float = 0.0
+    seam_crossings_collapsed: int = 0
 
 
 def diagnose(mesh: trimesh.Trimesh) -> list[str]:
@@ -184,17 +186,44 @@ def repair_mesh(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np
     `MeshRepairError` if the result still isn't valid afterward.
     """
     v_out, f_out, report = _repair_topology(vertices, faces)
-    film = find_zero_thickness_film(v_out, f_out)
-    if film is not None:
-        film_area, film_z, (x0, y0, x1, y1) = film
-        raise MeshRepairError(
-            f"The model has a zero-thickness film: {film_area:.0f} mm^2 of upward-facing surface lies "
-            f"exactly on top of downward-facing surface at Z = {film_z:.3f} (X {x0:.0f}..{x1:.0f}, "
-            f"Y {y0:.0f}..{y1:.0f}). That is not a valid solid and cannot be meshed. It usually comes from "
-            "a pocket or cut made exactly flush with a face: make the cut go slightly past that face "
-            "(to leave a through-hole) or stop short of it (to leave real material), then re-run."
+    v_out, f_out, n_seams = collapse_rim_crossings(v_out, f_out)
+    if n_seams:
+        report = RepairReport(
+            **{
+                **report.__dict__,
+                "was_already_valid": False,
+                "problems_found": [
+                    *report.problems_found,
+                    f"{n_seams} tiny self-crossing(s) in an outline collapsed (a closed curve overshooting its start)",
+                ],
+                "seam_crossings_collapsed": n_seams,
+            }
         )
-    v_out, f_out, n_caps = retriangulate_flat_caps(v_out, f_out)
+    film = find_zero_thickness_film(v_out, f_out)
+    v_out, f_out, n_caps = retriangulate_flat_caps(v_out, f_out, film[0] if film is not None else None)
+    if film is not None:
+        remaining = find_zero_thickness_film(v_out, f_out)
+        if remaining is not None:
+            pairs, area = remaining
+            centres = v_out[f_out[pairs[:, 0]]].mean(axis=1)
+            (x0, y0, z0), (x1, y1, _) = centres.min(axis=0), centres.max(axis=0)
+            raise MeshRepairError(
+                f"The model has a zero-thickness film that could not be removed automatically: {area:.0f} mm^2 "
+                f"of upward-facing surface lies exactly on top of downward-facing surface near Z = {z0:.3f} "
+                f"(X {x0:.0f}..{x1:.0f}, Y {y0:.0f}..{y1:.0f}). It usually comes from a pocket or cut made "
+                "exactly flush with a face (or capped over by Make Manifold): make the cutter go slightly "
+                "past that face, then re-run."
+            )
+        report = RepairReport(
+            **{
+                **report.__dict__,
+                "problems_found": [
+                    *report.problems_found,
+                    f"zero-thickness film removed ({film[1]:.0f} mm^2 -- now a through-hole)",
+                ],
+                "film_area_removed": film[1],
+            }
+        )
     if n_caps:
         report = RepairReport(
             **{
@@ -202,7 +231,7 @@ def repair_mesh(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np
                 "was_already_valid": False,
                 "problems_found": [
                     *report.problems_found,
-                    f"{n_caps} flat cap(s) with overlapping or inverted triangles (re-triangulated)",
+                    f"{n_caps} flat cap(s) rebuilt (overlapping, inverted or film-covered)",
                 ],
                 "caps_retriangulated": n_caps,
             }
@@ -404,30 +433,103 @@ def _triangulate_region(
     return new_points, np.vectorize(mapping.get)(tri_rows)
 
 
+def collapse_rim_crossings(
+    vertices: np.ndarray, faces: np.ndarray, plane_tol: float = 1e-4, max_connector: float = 1e-3
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Remove tiny bow-ties from flat caps' outlines: two rim edges that
+    cross each other where their far ends are joined by a very short edge.
+    This is what a closed curve leaves when its start and end overshoot
+    each other at the seam (seen: a 0.23 mm twist at the bottom of a waffle
+    stiffener's outline). The walls overlap there, and gmsh rejects the
+    result as "overlapping facets".
+
+    The two joined end vertices are merged at the crossing point -- the
+    shortest possible change, well under `max_connector` x model size -- and
+    the faces that collapse to nothing are dropped. Crossings with no short
+    connecting edge are left alone: they need a human.
+
+    Returns (vertices, faces, number of crossings collapsed).
+    """
+    from rtree import index
+
+    v = np.asarray(vertices, dtype=np.float64)
+    f = np.asarray(faces, dtype=np.int64)
+    size = max(float(np.ptp(v, axis=0).max()), 1.0)
+    flat = np.nonzero(np.ptp(v[f][:, :, 2], axis=1) <= plane_tol * size)[0]
+    if len(flat) == 0:
+        return v, f, 0
+    edges = np.sort(f[flat][:, [[0, 1], [1, 2], [2, 0]]], axis=2).reshape(-1, 2)
+    unique_edges, counts = np.unique(edges, axis=0, return_counts=True)
+    rim = unique_edges[counts == 1]
+    if len(rim) < 4:
+        return v, f, 0
+    rim_set = {(int(a), int(b)) for a, b in rim}
+    start, end = v[rim[:, 0], :2], v[rim[:, 1], :2]
+    tree = index.Index(properties=index.Property(dimension=2))
+    for i in range(len(rim)):
+        tree.insert(i, (*np.minimum(start[i], end[i]), *np.maximum(start[i], end[i])))
+
+    merge: dict[int, int] = {}
+    target: dict[int, np.ndarray] = {}
+    for i in range(len(rim)):
+        for j in tree.intersection((*np.minimum(start[i], end[i]), *np.maximum(start[i], end[i]))):
+            if j <= i or set(rim[i]) & set(rim[j]):
+                continue
+            p, d1 = start[i], end[i] - start[i]
+            r, d2 = start[j], end[j] - start[j]
+            den = d1[0] * d2[1] - d1[1] * d2[0]
+            if abs(den) < 1e-14:
+                continue
+            t = ((r - p)[0] * d2[1] - (r - p)[1] * d2[0]) / den
+            u = ((r - p)[0] * d1[1] - (r - p)[1] * d1[0]) / den
+            if not (1e-9 < t < 1 - 1e-9 and 1e-9 < u < 1 - 1e-9):
+                continue
+            crossing = p + t * d1
+            for a in rim[i]:
+                for b in rim[j]:
+                    key = (int(min(a, b)), int(max(a, b)))
+                    if key in rim_set and np.linalg.norm(v[a, :2] - v[b, :2]) <= max_connector * size:
+                        merge[int(b)] = int(a)
+                        target[int(a)] = crossing
+    if not merge:
+        return v, f, 0
+
+    root = np.arange(len(v))
+    for b, a in merge.items():
+        root[b] = a
+    v_out = v.copy()
+    for a, crossing in target.items():
+        group = [a] + [b for b, r in merge.items() if r == a]
+        v_out[a, :2] = crossing
+        v_out[a, 2] = v[group, 2].mean()
+    f_out = root[f]
+    f_out = f_out[(f_out[:, 0] != f_out[:, 1]) & (f_out[:, 1] != f_out[:, 2]) & (f_out[:, 2] != f_out[:, 0])]
+    used = np.unique(f_out)
+    remap = np.full(len(v_out), -1, dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    return v_out[used], remap[f_out], len(target)
+
+
 # A cap triangle facing against the cap's outward direction (an inverted
 # fold) bigger than this fraction of the cap's area gets the cap rebuilt;
 # smaller is float noise on a sliver.
 INVERTED_AREA_TOL = 1e-5
 
-# Coincident opposite-facing flat sheets (zero-thickness film) smaller than
-# this share of the total surface are ignored: tiny reversed-winding duplicate
-# slivers from botched booleans are known, harmless, and already handled
-# downstream.
-FILM_AREA_FRACTION = 0.005
-
 
 def find_zero_thickness_film(
     vertices: np.ndarray, faces: np.ndarray, plane_tol: float = 1e-4
-) -> tuple[float, float, np.ndarray] | None:
+) -> tuple[np.ndarray, float] | None:
     """Horizontal sheets with no thickness: an up-facing flat triangle
     lying (within `plane_tol` x model size) on top of a down-facing one.
     A solid can't have its inside on both sides of a plane, so these are
     zero-thickness films, typically a pocket cut exactly flush with the
-    underside by a boolean. They are valid topology (trimesh and MeshFix
-    accept them) but gmsh rejects them as "overlapping facets".
+    underside by a boolean (or capped over by Make Manifold). They are valid
+    topology (trimesh and MeshFix accept them) but gmsh rejects them as
+    "overlapping facets".
 
-    Returns (film area, Z, [xmin, ymin, xmax, ymax]) for the largest film
-    if it's a meaningful part of the surface, else None.
+    Returns (pairs, area): `pairs` is a (k, 2) array of (up-facing triangle,
+    the down-facing triangle it lies on) indices, `area` their total
+    up-facing area in mm^2. None if there is no film.
     """
     from rtree import index
 
@@ -458,25 +560,26 @@ def find_zero_thickness_film(
         l2 = ((c[1] - a[1]) * (p[0] - c[0]) + (a[0] - c[0]) * (p[1] - c[1])) / d
         return l1 > 0 and l2 > 0 and l1 + l2 < 1
 
-    film = []
+    pairs = []
     for i in up:
         centre = xy[i].mean(axis=0)
         for j in tree.intersection((*centre, *centre)):
             if abs(z[i] - z[j]) <= tol and inside(centre, xy[j]):
-                film.append(i)
+                pairs.append((int(i), int(j)))
                 break
-    if not film:
+    if not pairs:
         return None
-    film_area = float(area[film].sum())
-    total_area = 0.5 * float(np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1).sum())
-    if film_area < FILM_AREA_FRACTION * total_area:
-        return None
-    points = xy[film].reshape(-1, 2)
-    return film_area, float(z[film].mean()), np.concatenate([points.min(axis=0), points.max(axis=0)])
+    pairs_array = np.array(pairs)
+    film_area = float(area[pairs_array[:, 0]].sum())
+    return pairs_array, film_area
 
 
 def retriangulate_flat_caps(
-    vertices: np.ndarray, faces: np.ndarray, plane_tol: float = 1e-4, area_tol: float = 1e-3
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    film_pairs: np.ndarray | None = None,
+    plane_tol: float = 1e-4,
+    area_tol: float = 1e-3,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Re-triangulate horizontal (constant-Z) flat regions whose own
     triangulation is self-inconsistent, e.g. a top or bottom cap where
@@ -494,6 +597,12 @@ def retriangulate_flat_caps(
     caps, regions with non-manifold or pinched boundaries, and non-flat
     surfaces are left alone. Horizontal only, matching the world-Z thin
     axis the rest of the pipeline assumes.
+
+    `film_pairs` (from `find_zero_thickness_film`) merges each zero-thickness
+    film with the underside it lies on into one region, always rebuilt. The
+    film's own boundary loops become holes in that new surface: the film
+    has no volume, so dropping it just turns its outline into the
+    through-hole it was meant to be.
 
     Returns (vertices, faces, number of caps re-triangulated).
     """
@@ -528,6 +637,16 @@ def retriangulate_flat_caps(
                 cols.append(local[int(face)])
     graph = coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(len(flat), len(flat)))
     n_regions, label = connected_components(graph, directed=False)
+
+    film_regions: set[int] = set()
+    if film_pairs is not None and len(film_pairs):
+        linked = [(label[local[u]], label[local[d]]) for u, d in film_pairs.tolist() if u in local and d in local]
+        if linked:
+            a, b = np.array(linked).T
+            merge = coo_matrix((np.ones(len(a)), (a, b)), shape=(n_regions, n_regions))
+            n_regions, merged = connected_components(merge, directed=False)
+            label = merged[label]
+            film_regions = {int(label[local[u]]) for u, _ in film_pairs.tolist() if u in local}
 
     drop = np.zeros(len(f), dtype=bool)
     new_faces: list[np.ndarray] = []
@@ -573,7 +692,8 @@ def retriangulate_flat_caps(
         )
         neg_area = float(np.abs(signed[(signed < 0) == (net_boundary_area > 0)]).sum())
         mismatch = abs(float(np.abs(signed).sum()) - polygon_area) > area_tol * polygon_area
-        if polygon_area <= 0 or not (mismatch or neg_area > INVERTED_AREA_TOL * polygon_area):
+        inconsistent = mismatch or neg_area > INVERTED_AREA_TOL * polygon_area
+        if polygon_area <= 0 or not (inconsistent or region in film_regions):
             continue
 
         result = _triangulate_region(v, loops, depths, parents)
