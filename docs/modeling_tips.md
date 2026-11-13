@@ -38,6 +38,13 @@ bits you missed outside the final perimeter:
 - Apply scale and rotation (Ctrl+A) before any Boolean.
 - Use the Exact (or Manifold, if your Blender offers it) Boolean solver.
 - Run Mesh > Clean Up > Delete Loose, and Merge by Distance.
+- Be careful with the 3D Print Toolbox's Make Manifold. It is best-effort and fills
+  open edges with flat faces. If a Boolean left open edges at the bottom of a cut
+  (a cutter that sat exactly on a face), Make Manifold can cap them with a
+  zero-thickness sheet, turning a through-hole into an invalid film. Check
+  Select > Select All by Trait > Non Manifold right after the Boolean, before
+  cleaning up: open edges there mean the cutter needs to overshoot, not that the
+  mesh needs patching.
 - Then run Detect Bonds. A "geometry error" there points at the body, and the message
   now says what is wrong and where.
 
