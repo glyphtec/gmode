@@ -327,4 +327,7 @@ def test_untrimmed_waffle_stiffener_repairs_and_meshes(tmp_path):
     assert np.isclose(fixed.volume, 184038.9, rtol=1e-4)
     mesh = mesh_surface(tmp_path / "fixed.stl", element_size=4.0)
     assert next(c.data.shape[0] for c in mesh.cells if c.type == "tetra10") > 1000
+    # The add-on's default per-body element size (10 mm) failed here when the
+    # rebuilt caps were flipped after rebuilding.
+    mesh_surface(tmp_path / "fixed.stl", element_size=10.0)
 

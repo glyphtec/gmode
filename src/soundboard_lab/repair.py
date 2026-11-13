@@ -199,6 +199,12 @@ def repair_mesh(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np
                 "seam_crossings_collapsed": n_seams,
             }
         )
+    # Flip cap slivers first: the caps rebuilt below come out of gmsh already
+    # well-shaped, and flipping their diagonals afterwards made gmsh's later
+    # volume meshing fail at some element sizes.
+    f_out, flips = flip_cap_triangles(v_out, f_out)
+    if flips:
+        report = RepairReport(**{**report.__dict__, "cap_triangles_flipped": flips})
     film = find_zero_thickness_film(v_out, f_out)
     v_out, f_out, n_caps = retriangulate_flat_caps(v_out, f_out, film[0] if film is not None else None)
     if film is not None:
@@ -236,9 +242,6 @@ def repair_mesh(vertices: np.ndarray, faces: np.ndarray) -> tuple[np.ndarray, np
                 "caps_retriangulated": n_caps,
             }
         )
-    f_out, flips = flip_cap_triangles(v_out, f_out)
-    if flips:
-        report = RepairReport(**{**report.__dict__, "cap_triangles_flipped": flips})
     return v_out, f_out, report
 
 
